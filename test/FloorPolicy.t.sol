@@ -76,7 +76,7 @@ contract FloorPolicyTest is Test {
         FloorPolicyHarness h = new FloorPolicyHarness(cfg(FloorPolicy.Kind.Fixed), NAV0);
         uint256 f1 = h.update(NAV0, 0.01e18, T0);
         // rate jumps back up: raw PV would fall, clamp must hold the floor
-        uint256 f2 = h.update(NAV0, 0.10e18, T0 + 1);
+        uint256 f2 = h.update(NAV0, 0.1e18, T0 + 1);
         assertGe(f2, f1);
     }
 

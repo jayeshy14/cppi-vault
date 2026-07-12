@@ -22,11 +22,7 @@ contract CPPIControllerTest is Test {
         fc.protectionWad = 0.9e18;
 
         RebalancePolicy.Config memory rc = RebalancePolicy.Config({
-            minInterval: 1 hours,
-            cadence: 1 days,
-            driftSmallBps: 200,
-            driftLargeBps: 500,
-            cushionFloorBps: 300
+            minInterval: 1 hours, cadence: 1 days, driftSmallBps: 200, driftLargeBps: 500, cushionFloorBps: 300
         });
 
         controller = new CPPIController(vault, 2e18, fc, rc);

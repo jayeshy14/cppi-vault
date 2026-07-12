@@ -17,11 +17,11 @@ library RebalancePolicy {
     }
 
     struct Config {
-        uint64 minInterval;        // hard anti-thrash floor for every path
-        uint64 cadence;            // scheduled path spacing
-        uint16 driftSmallBps;      // scheduled path fires at drift >= this
-        uint16 driftLargeBps;      // emergency path fires at drift >= this
-        uint16 cushionFloorBps;    // emergency path fires at cushion/nav <= this
+        uint64 minInterval; // hard anti-thrash floor for every path
+        uint64 cadence; // scheduled path spacing
+        uint16 driftSmallBps; // scheduled path fires at drift >= this
+        uint16 driftLargeBps; // emergency path fires at drift >= this
+        uint16 cushionFloorBps; // emergency path fires at cushion/nav <= this
     }
 
     error InvalidConfig();
@@ -35,13 +35,11 @@ library RebalancePolicy {
     /// @notice Classify what may fire now. Callers enforce keeper gating for
     ///         Scheduled; Emergency is permissionless by design so anyone can
     ///         save the vault if the keeper is down during a crash.
-    function classify(
-        Config memory c,
-        uint256 lastRebalanceAt,
-        uint256 nowTs,
-        uint256 driftBps_,
-        uint256 cushionBps_
-    ) internal pure returns (Trigger) {
+    function classify(Config memory c, uint256 lastRebalanceAt, uint256 nowTs, uint256 driftBps_, uint256 cushionBps_)
+        internal
+        pure
+        returns (Trigger)
+    {
         if (lastRebalanceAt != 0 && nowTs < lastRebalanceAt + c.minInterval) {
             return Trigger.None;
         }

@@ -26,15 +26,15 @@ library FloorPolicy {
         uint64 termStart;
         uint64 termEnd;
         uint256 protectionWad; // P: fraction of term-start NAV promised at maturity
-        uint256 triggerWad;    // T (Step only): step fires when nav >= T x floor
-        uint256 stepWad;       // k (Step only): protectedAmount multiplier per step
-        uint256 ratchetWad;    // TIPP only: floor >= ratchet x high-water NAV
+        uint256 triggerWad; // T (Step only): step fires when nav >= T x floor
+        uint256 stepWad; // k (Step only): protectedAmount multiplier per step
+        uint256 ratchetWad; // TIPP only: floor >= ratchet x high-water NAV
     }
 
     struct State {
         uint256 protectedAmount; // absolute asset terms; Step raises this
-        uint256 hwmNav;          // TIPP high-water NAV
-        uint256 lastFloor;       // monotonicity clamp
+        uint256 hwmNav; // TIPP high-water NAV
+        uint256 lastFloor; // monotonicity clamp
         uint32 stepCount;
     }
 
@@ -84,10 +84,7 @@ library FloorPolicy {
             if (ratchetFloor > floor) floor = ratchetFloor;
         } else if (c.kind == Kind.Step) {
             uint256 steps;
-            while (
-                steps < MAX_STEPS_PER_UPDATE && floor != 0
-                    && nav >= floor.mulWad(c.triggerWad)
-            ) {
+            while (steps < MAX_STEPS_PER_UPDATE && floor != 0 && nav >= floor.mulWad(c.triggerWad)) {
                 s.protectedAmount = s.protectedAmount.mulWad(c.stepWad);
                 floor = CPPIMath.floorValue(s.protectedAmount, rateWad, timeLeft);
                 unchecked {
@@ -120,10 +117,7 @@ library FloorPolicy {
         } else if (c.kind == Kind.Step) {
             uint256 protectedAmount = s.protectedAmount;
             uint256 steps;
-            while (
-                steps < MAX_STEPS_PER_UPDATE && floor != 0
-                    && nav >= floor.mulWad(c.triggerWad)
-            ) {
+            while (steps < MAX_STEPS_PER_UPDATE && floor != 0 && nav >= floor.mulWad(c.triggerWad)) {
                 protectedAmount = protectedAmount.mulWad(c.stepWad);
                 floor = CPPIMath.floorValue(protectedAmount, rateWad, timeLeft);
                 unchecked {

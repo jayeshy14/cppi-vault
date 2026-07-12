@@ -26,27 +26,19 @@ contract CPPIMathTest is Test {
     }
 
     /// forge-config: default.fuzz.runs = 1024
-    function testFuzz_floorValue_neverExceedsProtected(uint256 rate, uint256 secondsLeft)
-        public
-        pure
-    {
+    function testFuzz_floorValue_neverExceedsProtected(uint256 rate, uint256 secondsLeft) public pure {
         rate = bound(rate, 0, 1e18);
         secondsLeft = bound(secondsLeft, 0, 10 * 365 days);
         assertLe(CPPIMath.floorValue(PROTECTED, rate, secondsLeft), PROTECTED);
     }
 
     /// forge-config: default.fuzz.runs = 1024
-    function testFuzz_floorValue_accretesMonotonically(uint256 rate, uint256 t1, uint256 t2)
-        public
-        pure
-    {
+    function testFuzz_floorValue_accretesMonotonically(uint256 rate, uint256 t1, uint256 t2) public pure {
         rate = bound(rate, 0, 1e18);
         t1 = bound(t1, 0, 10 * 365 days);
         t2 = bound(t2, 0, t1);
         // less time left => floor is closer to the protected amount
-        assertGe(
-            CPPIMath.floorValue(PROTECTED, rate, t2), CPPIMath.floorValue(PROTECTED, rate, t1)
-        );
+        assertGe(CPPIMath.floorValue(PROTECTED, rate, t2), CPPIMath.floorValue(PROTECTED, rate, t1));
     }
 
     function test_targetRisky_matchesWorkedExample() public pure {
