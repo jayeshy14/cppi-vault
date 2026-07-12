@@ -31,7 +31,9 @@ contract CPPIController {
     uint256 internal constant MAX_RATE_STEP_WAD = 0.02e18;
     uint256 internal lastRateWad;
 
-    event TermStarted(uint64 indexed termNumber, uint64 termStart, uint64 termEnd, uint256 nav, uint256 protectedAmount);
+    event TermStarted(
+        uint64 indexed termNumber, uint64 termStart, uint64 termEnd, uint256 nav, uint256 protectedAmount
+    );
     event TermSettled(uint64 indexed termNumber, uint256 nav, uint256 protectedAmount, uint256 shortfall);
     event RebalanceRecorded(uint64 indexed termNumber, RebalancePolicy.Trigger trigger, uint256 floor, uint256 target);
 
