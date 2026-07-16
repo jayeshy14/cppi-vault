@@ -35,30 +35,44 @@ contract Deploy is Script {
 
     uint256 constant MULTIPLIER = 2e18; // protocol-fixed: breach risk lives here
 
+    // deployed set lives in storage to keep run() stack-light
+    CPPIVault vault;
+    CPPIController controller;
+    SafeLegManager safeLeg;
+    RiskyLegManager riskyLeg;
+    ExecutionModule exec;
+    OracleHub oracle;
+    PendlePTAdapter pt;
+    address keeper;
+    address guardian;
+
     function run() external {
-        string memory class_ = vm.envString("CLASS");
-        address pendleMarket = vm.envAddress("PENDLE_MARKET");
-        address keeper = vm.envAddress("KEEPER");
-        address guardian = vm.envAddress("GUARDIAN");
+        keeper = vm.envAddress("KEEPER");
+        guardian = vm.envAddress("GUARDIAN");
         address owner = vm.envAddress("OWNER");
 
-        FloorPolicy.Config memory fc = _classConfig(class_);
+        vm.startBroadcast();
+        _deploy(_classConfig(vm.envString("CLASS")), vm.envAddress("PENDLE_MARKET"));
+        _wire();
+        _handoff(owner);
+        vm.stopBroadcast();
+        _log();
+    }
+
+    function _deploy(FloorPolicy.Config memory fc, address pendleMarket) internal {
         RebalancePolicy.Config memory rc = RebalancePolicy.Config({
             minInterval: 1 hours, cadence: 1 days, driftSmallBps: 200, driftLargeBps: 500, cushionFloorBps: 300
         });
+        vault = new CPPIVault(USDC, 6, msg.sender);
+        controller = new CPPIController(address(vault), MULTIPLIER, fc, rc);
+        safeLeg = new SafeLegManager(address(vault), USDC, 6, msg.sender);
+        riskyLeg = new RiskyLegManager(WETH, WSTETH, msg.sender);
+        exec = new ExecutionModule(address(vault), USDC, WETH, WSTETH, msg.sender);
+        oracle = new OracleHub(CHAINLINK_ETH_USD, WSTETH, WSTETH_WETH_POOL_100, true, msg.sender);
+        pt = new PendlePTAdapter(PENDLE_ROUTER, PENDLE_PY_ORACLE, pendleMarket, USDC, USDC, 6, 900, msg.sender);
+    }
 
-        vm.startBroadcast();
-
-        CPPIVault vault = new CPPIVault(USDC, 6, msg.sender);
-        CPPIController controller = new CPPIController(address(vault), MULTIPLIER, fc, rc);
-        SafeLegManager safeLeg = new SafeLegManager(address(vault), USDC, 6, msg.sender);
-        RiskyLegManager riskyLeg = new RiskyLegManager(WETH, WSTETH, msg.sender);
-        ExecutionModule exec = new ExecutionModule(address(vault), USDC, WETH, WSTETH, msg.sender);
-        OracleHub oracle = new OracleHub(CHAINLINK_ETH_USD, WSTETH, WSTETH_WETH_POOL_100, true, msg.sender);
-        PendlePTAdapter pt =
-            new PendlePTAdapter(PENDLE_ROUTER, PENDLE_PY_ORACLE, pendleMarket, USDC, USDC, 6, 900, msg.sender);
-
-        // wiring
+    function _wire() internal {
         vault.setController(controller);
         vault.setPeriphery(
             ILeg(address(safeLeg)),
@@ -74,20 +88,20 @@ contract Deploy is Script {
         oracle.setPtAdapter(IPTAdapter(address(pt)));
         pt.setManager(address(safeLeg));
         oracle.refresh();
+    }
 
-        // ownership handoff last, after all wiring succeeded
-        if (owner != msg.sender) {
-            vault.transferOwnership(owner);
-            safeLeg.transferOwnership(owner);
-            riskyLeg.transferOwnership(owner);
-            exec.transferOwnership(owner);
-            oracle.transferOwnership(owner);
-            pt.transferOwnership(owner);
-        }
+    /// @dev Ownership handoff last, only after all wiring succeeded.
+    function _handoff(address owner) internal {
+        if (owner == msg.sender) return;
+        vault.transferOwnership(owner);
+        safeLeg.transferOwnership(owner);
+        riskyLeg.transferOwnership(owner);
+        exec.transferOwnership(owner);
+        oracle.transferOwnership(owner);
+        pt.transferOwnership(owner);
+    }
 
-        vm.stopBroadcast();
-
-        console.log("class     ", class_);
+    function _log() internal view {
         console.log("vault     ", address(vault));
         console.log("controller", address(controller));
         console.log("safeLeg   ", address(safeLeg));
