@@ -35,6 +35,13 @@ contract MockPTAdapter is IPTAdapter {
         valueWad += assets * 1e12;
     }
 
+    /// @dev The real PT accretes toward par; this mock does not. Scenario
+    ///      tests inject that carry explicitly so maturity math is faithful.
+    function simulateYield(uint256 amountWad) external {
+        valueWad += amountWad;
+        MockUSDC(usdc).mint(address(this), amountWad / 1e12);
+    }
+
     function withdraw(uint256 amountWad, address to) external returns (uint256 assetsOut) {
         valueWad -= amountWad;
         assetsOut = (amountWad * (10_000 - haircutBps) / 10_000) / 1e12;
