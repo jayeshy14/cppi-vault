@@ -6,6 +6,9 @@ pragma solidity ^0.8.24;
 interface IPriceSource {
     function ethUsdWad() external view returns (uint256);
     function wstethUsdWad() external view returns (uint256);
+    /// @notice False when the wstETH rate-vs-pool basis breaches its limit
+    ///         (or the feed is stale): composition buys must not proceed.
+    function wstethBuyAllowed() external view returns (bool);
 }
 
 /// @notice Minimal Uniswap V3 SwapRouter02 surface (no deadline field).

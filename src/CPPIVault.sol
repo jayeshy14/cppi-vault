@@ -9,6 +9,10 @@ import {CPPIController} from "./CPPIController.sol";
 import {RebalancePolicy} from "./libraries/RebalancePolicy.sol";
 import {ILeg, IExecutionModule, IRateOracle} from "./interfaces/IVaultPeriphery.sol";
 
+interface IOracleHealth {
+    function healthy() external view returns (bool);
+}
+
 /// @title CPPIVault
 /// @notice Term-based capital-protected vault share token with asynchronous,
 ///         epoch-settled deposits and redemptions. Holds idle deposit asset;
@@ -38,6 +42,15 @@ contract CPPIVault is ERC20, Ownable {
     address public keeper;
     address public guardian;
     bool public paused;
+    IOracleHealth public healthSource; // optional: gates NEW user flows only
+
+    // fees: caps enforced in code, zero by default (curator loss-leader norm)
+    uint16 public managementFeeBps; // per year, on shareholder NAV
+    uint16 public performanceFeeBps; // on term gains above the protected amount
+    address public feeRecipient;
+    uint64 public lastMgmtAccrualAt;
+    uint16 public constant MAX_MANAGEMENT_FEE_BPS = 200;
+    uint16 public constant MAX_PERFORMANCE_FEE_BPS = 2000;
 
     uint256 internal constant SCHEDULED_SLIPPAGE_BPS = 50;
     uint256 internal constant EMERGENCY_SLIPPAGE_BPS = 150;
@@ -66,6 +79,9 @@ contract CPPIVault is ERC20, Ownable {
     event AssetsClaimed(address indexed user, uint64 indexed epoch, uint256 assetsWad);
     event Rebalanced(RebalancePolicy.Trigger trigger, int256 deltaWad, uint256 floor, uint256 target);
     event PausedSet(bool paused);
+    event FeesSet(uint16 managementBps, uint16 performanceBps, address recipient);
+    event ManagementFeeAccrued(uint256 feeShares);
+    event PerformanceFeeCharged(uint256 feeShares, uint256 gainWad);
 
     error ZeroAmount();
     error Paused();
@@ -78,6 +94,8 @@ contract CPPIVault is ERC20, Ownable {
     error NothingToSettle();
     error InsufficientIdle();
     error AlreadySet();
+    error OracleUnhealthy();
+    error FeeAboveCap();
 
     modifier onlyKeeper() {
         if (msg.sender != keeper && msg.sender != owner()) revert NotKeeper();
@@ -119,6 +137,19 @@ contract CPPIVault is ERC20, Ownable {
         guardian = guardian_;
     }
 
+    function setHealthSource(IOracleHealth healthSource_) external onlyOwner {
+        healthSource = healthSource_;
+    }
+
+    function setFees(uint16 managementBps, uint16 performanceBps, address recipient) external onlyOwner {
+        if (managementBps > MAX_MANAGEMENT_FEE_BPS || performanceBps > MAX_PERFORMANCE_FEE_BPS) revert FeeAboveCap();
+        _accrueManagementFee();
+        managementFeeBps = managementBps;
+        performanceFeeBps = performanceBps;
+        feeRecipient = recipient;
+        emit FeesSet(managementBps, performanceBps, recipient);
+    }
+
     function setPaused(bool paused_) external {
         if (msg.sender != guardian && msg.sender != owner()) revert NotGuardian();
         paused = paused_;
@@ -147,6 +178,7 @@ contract CPPIVault is ERC20, Ownable {
 
     function requestDeposit(uint256 assets) external {
         if (paused) revert Paused();
+        _requireOracleHealthy();
         if (assets == 0) revert ZeroAmount();
         Request storage r = depositRequests[msg.sender];
         if (r.amountWad != 0 && r.epoch != currentEpoch) revert PendingRequestFromEarlierEpoch();
@@ -160,6 +192,7 @@ contract CPPIVault is ERC20, Ownable {
 
     function requestRedeem(uint256 shares) external {
         if (paused) revert Paused();
+        _requireOracleHealthy();
         if (shares == 0) revert ZeroAmount();
         Request storage r = redeemRequests[msg.sender];
         if (r.amountWad != 0 && r.epoch != currentEpoch) revert PendingRequestFromEarlierEpoch();
@@ -177,6 +210,7 @@ contract CPPIVault is ERC20, Ownable {
     ///         shares, and reserve their payout. Requires enough idle asset
     ///         to cover reserved payouts (keeper frees assets beforehand).
     function settleEpoch() external onlyKeeper {
+        _accrueManagementFee();
         uint256 depositsWad = totalPendingDepositsWad;
         uint256 redeemShares = totalPendingRedeemShares;
         if (depositsWad == 0 && redeemShares == 0) revert NothingToSettle();
@@ -233,7 +267,17 @@ contract CPPIVault is ERC20, Ownable {
     }
 
     function settleTerm() external onlyKeeper returns (uint256 shortfall) {
-        return controller.settleTerm(shareholderNav());
+        _accrueManagementFee();
+        uint256 protectedAmount = controller.protectedAmount();
+        uint256 nav = shareholderNav();
+        shortfall = controller.settleTerm(nav);
+        if (performanceFeeBps > 0 && feeRecipient != address(0) && nav > protectedAmount) {
+            uint256 gainWad = nav - protectedAmount;
+            uint256 feeWad = gainWad * performanceFeeBps / 10_000;
+            uint256 feeShares = feeWad.divWad(navPerShare());
+            _mint(feeRecipient, feeShares);
+            emit PerformanceFeeCharged(feeShares, gainWad);
+        }
     }
 
     // ---------- rebalancing ----------
@@ -262,6 +306,26 @@ contract CPPIVault is ERC20, Ownable {
     }
 
     // ---------- internal ----------
+
+    /// @dev Mint management-fee shares pro-rata to elapsed time. Dilutes all
+    ///      holders equally; called before any settlement pricing so epochs
+    ///      never straddle an unaccrued period.
+    function _accrueManagementFee() internal {
+        uint64 last = lastMgmtAccrualAt;
+        lastMgmtAccrualAt = uint64(block.timestamp);
+        if (managementFeeBps == 0 || feeRecipient == address(0) || last == 0 || totalSupply() == 0) return;
+        uint256 elapsed = block.timestamp - last;
+        if (elapsed == 0) return;
+        uint256 feeWad = shareholderNav() * managementFeeBps * elapsed / (10_000 * 365 days);
+        if (feeWad == 0) return;
+        uint256 feeShares = feeWad.divWad(navPerShare());
+        _mint(feeRecipient, feeShares);
+        emit ManagementFeeAccrued(feeShares);
+    }
+
+    function _requireOracleHealthy() internal view {
+        if (address(healthSource) != address(0) && !healthSource.healthy()) revert OracleUnhealthy();
+    }
 
     function _idleWad() internal view returns (uint256) {
         return SafeTransferLib.balanceOf(asset, address(this)) * assetScale;

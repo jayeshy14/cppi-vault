@@ -35,6 +35,10 @@ contract ChainlinkPriceSource is IPriceSource {
     function wstethUsdWad() external view returns (uint256) {
         return ethUsdWad() * WSTETH.stEthPerToken() / 1e18;
     }
+
+    function wstethBuyAllowed() external pure returns (bool) {
+        return true;
+    }
 }
 
 contract ExecutionModuleForkTest is Test {
@@ -82,16 +86,18 @@ contract ExecutionModuleForkTest is Test {
         if (!runFork) return;
         uint256 before = _totalValue();
 
-        // buy 50k of ETH exposure from vault idle, Chainlink-anchored minOut
+        // buy 50k of ETH exposure from vault idle, Chainlink-anchored minOut;
+        // the post-rebalance sweep parks the remaining free idle in the safe leg
         vm.prank(address(vaultStub));
         exec.executeRebalance(int256(50_000e18), 50);
         assertApproxEqRel(riskyLeg.value(), 50_000e18, 0.01e18);
+        assertApproxEqRel(safeLeg.value(), 50_000e18, 0.01e18);
 
-        // sell half back: proceeds land in safe leg and allocate to buffer+PT
+        // sell half back: proceeds join the safe leg (buffer + PT)
         vm.prank(address(vaultStub));
         exec.executeRebalance(-int256(25_000e18), 50);
         assertApproxEqRel(riskyLeg.value(), 25_000e18, 0.015e18);
-        assertApproxEqRel(safeLeg.value(), 25_000e18, 0.015e18);
+        assertApproxEqRel(safeLeg.value(), 75_000e18, 0.015e18);
         assertGt(pt.valueWad(), 0); // inflow allocated beyond the buffer
 
         // full round trip through two real 5bps pools: < 40bps total cost
