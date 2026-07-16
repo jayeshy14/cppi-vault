@@ -62,6 +62,9 @@ contract CPPIVault is ERC20, Ownable {
         uint192 amountWad; // deposits: asset WAD; redeems: share WAD
     }
 
+    /// @dev ERC-7540 operator model: operator may act for a controller.
+    mapping(address => mapping(address => bool)) public isOperator;
+
     uint64 public currentEpoch = 1;
     mapping(uint64 => uint256) public epochNavPerShare; // 0 = unsettled
     mapping(address => Request) public depositRequests;
@@ -82,6 +85,7 @@ contract CPPIVault is ERC20, Ownable {
     event FeesSet(uint16 managementBps, uint16 performanceBps, address recipient);
     event ManagementFeeAccrued(uint256 feeShares);
     event PerformanceFeeCharged(uint256 feeShares, uint256 gainWad);
+    event OperatorSet(address indexed controller, address indexed operator, bool approved);
 
     error ZeroAmount();
     error Paused();
@@ -96,6 +100,8 @@ contract CPPIVault is ERC20, Ownable {
     error AlreadySet();
     error OracleUnhealthy();
     error FeeAboveCap();
+    error NotOperator();
+    error ClaimMismatch();
 
     modifier onlyKeeper() {
         if (msg.sender != keeper && msg.sender != owner()) revert NotKeeper();
@@ -176,31 +182,59 @@ contract CPPIVault is ERC20, Ownable {
 
     // ---------- requests ----------
 
-    function requestDeposit(uint256 assets) external {
+    function setOperator(address operator, bool approved) external returns (bool) {
+        isOperator[msg.sender][operator] = approved;
+        emit OperatorSet(msg.sender, operator, approved);
+        return true;
+    }
+
+    function requestDeposit(uint256 assets) external returns (uint256) {
+        return _requestDeposit(assets, msg.sender, msg.sender);
+    }
+
+    /// @notice ERC-7540 request form. requestId is the epoch the request
+    ///         settles in; requests are fungible within an epoch.
+    function requestDeposit(uint256 assets, address controller, address owner_) external returns (uint256) {
+        _authControllerOrOperator(owner_);
+        return _requestDeposit(assets, controller, owner_);
+    }
+
+    function requestRedeem(uint256 shares) external returns (uint256) {
+        return _requestRedeem(shares, msg.sender, msg.sender);
+    }
+
+    function requestRedeem(uint256 shares, address controller, address owner_) external returns (uint256) {
+        _authControllerOrOperator(owner_);
+        return _requestRedeem(shares, controller, owner_);
+    }
+
+    function _requestDeposit(uint256 assets, address controller, address owner_) internal returns (uint256) {
         if (paused) revert Paused();
         _requireOracleHealthy();
         if (assets == 0) revert ZeroAmount();
-        Request storage r = depositRequests[msg.sender];
+        Request storage r = depositRequests[controller];
         if (r.amountWad != 0 && r.epoch != currentEpoch) revert PendingRequestFromEarlierEpoch();
-        asset.safeTransferFrom(msg.sender, address(this), assets);
+        asset.safeTransferFrom(owner_, address(this), assets);
         uint256 wad = assets * assetScale;
         r.epoch = currentEpoch;
         r.amountWad += uint192(wad);
         totalPendingDepositsWad += wad;
-        emit DepositRequested(msg.sender, currentEpoch, wad);
+        emit DepositRequested(controller, currentEpoch, wad);
+        return currentEpoch;
     }
 
-    function requestRedeem(uint256 shares) external {
+    function _requestRedeem(uint256 shares, address controller, address owner_) internal returns (uint256) {
         if (paused) revert Paused();
         _requireOracleHealthy();
         if (shares == 0) revert ZeroAmount();
-        Request storage r = redeemRequests[msg.sender];
+        Request storage r = redeemRequests[controller];
         if (r.amountWad != 0 && r.epoch != currentEpoch) revert PendingRequestFromEarlierEpoch();
-        _transfer(msg.sender, address(this), shares); // lock shares in custody
+        _transfer(owner_, address(this), shares); // lock shares in custody
         r.epoch = currentEpoch;
         r.amountWad += uint192(shares);
         totalPendingRedeemShares += shares;
-        emit RedeemRequested(msg.sender, currentEpoch, shares);
+        emit RedeemRequested(controller, currentEpoch, shares);
+        return currentEpoch;
     }
 
     // ---------- settlement ----------
@@ -236,28 +270,110 @@ contract CPPIVault is ERC20, Ownable {
     }
 
     function claimShares() external {
-        Request storage r = depositRequests[msg.sender];
-        uint256 price = epochNavPerShare[r.epoch];
-        if (r.amountWad == 0) revert NothingToClaim();
-        if (price == 0) revert EpochNotSettled();
-        uint256 shares = uint256(r.amountWad).divWad(price);
-        uint64 epoch = r.epoch;
-        delete depositRequests[msg.sender];
-        _transfer(address(this), msg.sender, shares);
-        emit SharesClaimed(msg.sender, epoch, shares);
+        _claimDeposit(msg.sender, msg.sender);
     }
 
     function claimAssets() external {
-        Request storage r = redeemRequests[msg.sender];
+        _claimRedeem(msg.sender, msg.sender);
+    }
+
+    /// @notice ERC-7540 claim entrypoints. Deviation from the standard,
+    ///         documented: claims are full-only; `assets`/`shares` must match
+    ///         the whole claimable amount.
+    function deposit(uint256 assets, address receiver, address controller) external returns (uint256 shares) {
+        _authControllerOrOperator(controller);
+        if (assets != claimableDepositRequest(depositRequests[controller].epoch, controller)) revert ClaimMismatch();
+        return _claimDeposit(controller, receiver);
+    }
+
+    function mint(uint256 shares, address receiver, address controller) external returns (uint256 assets) {
+        _authControllerOrOperator(controller);
+        Request storage r = depositRequests[controller];
+        uint256 price = epochNavPerShare[r.epoch];
+        if (price == 0 || shares != uint256(r.amountWad).divWad(price)) revert ClaimMismatch();
+        assets = uint256(r.amountWad) / assetScale;
+        _claimDeposit(controller, receiver);
+    }
+
+    function redeem(uint256 shares, address receiver, address controller) external returns (uint256 assets) {
+        _authControllerOrOperator(controller);
+        if (shares != uint256(redeemRequests[controller].amountWad)) revert ClaimMismatch();
+        if (epochNavPerShare[redeemRequests[controller].epoch] == 0) revert EpochNotSettled();
+        return _claimRedeem(controller, receiver);
+    }
+
+    function withdraw(uint256 assets, address receiver, address controller) external returns (uint256 shares) {
+        _authControllerOrOperator(controller);
+        Request storage r = redeemRequests[controller];
+        uint256 price = epochNavPerShare[r.epoch];
+        if (price == 0) revert EpochNotSettled();
+        if (assets != uint256(r.amountWad).mulWad(price) / assetScale) revert ClaimMismatch();
+        shares = uint256(r.amountWad);
+        _claimRedeem(controller, receiver);
+    }
+
+    function _claimDeposit(address controller, address receiver) internal returns (uint256 shares) {
+        Request storage r = depositRequests[controller];
+        uint256 price = epochNavPerShare[r.epoch];
+        if (r.amountWad == 0) revert NothingToClaim();
+        if (price == 0) revert EpochNotSettled();
+        shares = uint256(r.amountWad).divWad(price);
+        uint64 epoch = r.epoch;
+        delete depositRequests[controller];
+        _transfer(address(this), receiver, shares);
+        emit SharesClaimed(controller, epoch, shares);
+    }
+
+    function _claimRedeem(address controller, address receiver) internal returns (uint256 assets) {
+        Request storage r = redeemRequests[controller];
         uint256 price = epochNavPerShare[r.epoch];
         if (r.amountWad == 0) revert NothingToClaim();
         if (price == 0) revert EpochNotSettled();
         uint256 payoutWad = uint256(r.amountWad).mulWad(price);
         uint64 epoch = r.epoch;
-        delete redeemRequests[msg.sender];
+        delete redeemRequests[controller];
         totalReservedPayoutsWad -= payoutWad;
-        asset.safeTransfer(msg.sender, payoutWad / assetScale);
-        emit AssetsClaimed(msg.sender, epoch, payoutWad);
+        assets = payoutWad / assetScale;
+        asset.safeTransfer(receiver, assets);
+        emit AssetsClaimed(controller, epoch, payoutWad);
+    }
+
+    // ---------- ERC-7540 views ----------
+
+    function pendingDepositRequest(uint256 requestId, address controller) public view returns (uint256 assets) {
+        Request storage r = depositRequests[controller];
+        if (r.epoch == requestId && epochNavPerShare[r.epoch] == 0) return uint256(r.amountWad) / assetScale;
+    }
+
+    function claimableDepositRequest(uint256 requestId, address controller) public view returns (uint256 assets) {
+        Request storage r = depositRequests[controller];
+        if (r.epoch == requestId && epochNavPerShare[r.epoch] != 0) return uint256(r.amountWad) / assetScale;
+    }
+
+    function pendingRedeemRequest(uint256 requestId, address controller) public view returns (uint256 shares) {
+        Request storage r = redeemRequests[controller];
+        if (r.epoch == requestId && epochNavPerShare[r.epoch] == 0) return uint256(r.amountWad);
+    }
+
+    function claimableRedeemRequest(uint256 requestId, address controller) public view returns (uint256 shares) {
+        Request storage r = redeemRequests[controller];
+        if (r.epoch == requestId && epochNavPerShare[r.epoch] != 0) return uint256(r.amountWad);
+    }
+
+    function totalAssets() external view returns (uint256) {
+        return shareholderNav() / assetScale;
+    }
+
+    /// @notice ERC-7575 single-share-token vault: the share IS this contract.
+    function share() external view returns (address) {
+        return address(this);
+    }
+
+    function supportsInterface(bytes4 interfaceId) external pure returns (bool) {
+        return interfaceId == 0x01ffc9a7 // ERC-165
+            || interfaceId == 0xe3bc4e65 // ERC-7540 operator
+            || interfaceId == 0xce3bbe50 // ERC-7540 async deposit
+            || interfaceId == 0x620ee8e4; // ERC-7540 async redeem
     }
 
     // ---------- term lifecycle ----------
@@ -321,6 +437,10 @@ contract CPPIVault is ERC20, Ownable {
         uint256 feeShares = feeWad.divWad(navPerShare());
         _mint(feeRecipient, feeShares);
         emit ManagementFeeAccrued(feeShares);
+    }
+
+    function _authControllerOrOperator(address controller) internal view {
+        if (msg.sender != controller && !isOperator[controller][msg.sender]) revert NotOperator();
     }
 
     function _requireOracleHealthy() internal view {
