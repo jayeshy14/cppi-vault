@@ -28,6 +28,11 @@ contract Mock18 is ERC20 {
 contract MockPriceSource is IPriceSource {
     uint256 public ethUsdWad = 2000e18;
     uint256 public wstethUsdWad = 2400e18;
+    bool public wstethBuyAllowed = true;
+
+    function setBuyAllowed(bool v) external {
+        wstethBuyAllowed = v;
+    }
 
     function setEth(uint256 p) external {
         ethUsdWad = p;
@@ -98,12 +103,19 @@ contract MockSwapRouter is ISwapRouter02 {
 contract VaultStub {
     uint256 public totalPendingDepositsWad;
     uint256 public totalReservedPayoutsWad;
+    uint256 public totalPendingRedeemShares;
+    uint256 public navPerShare = 1e18;
     uint256 public totalNav;
 
     function set(uint256 pending, uint256 reserved, uint256 nav) external {
         totalPendingDepositsWad = pending;
         totalReservedPayoutsWad = reserved;
         totalNav = nav;
+    }
+
+    function setRedeems(uint256 shares, uint256 price) external {
+        totalPendingRedeemShares = shares;
+        navPerShare = price;
     }
 
     function approveToken(address token, address spender) external {

@@ -12,6 +12,8 @@ import {RiskyLegManager} from "./RiskyLegManager.sol";
 interface IVaultAccounting {
     function totalPendingDepositsWad() external view returns (uint256);
     function totalReservedPayoutsWad() external view returns (uint256);
+    function totalPendingRedeemShares() external view returns (uint256);
+    function navPerShare() external view returns (uint256);
 }
 
 /// @title ExecutionModule
@@ -91,11 +93,25 @@ contract ExecutionModule is IExecutionModule, Ownable {
         } else {
             _sellRisky(uint256(-deltaWad), maxSlippageBps);
         }
+        _sweepIdle();
     }
 
+    /// @dev Redemption funding sources the safe leg first; if it cannot
+    ///      cover the request (e.g. full exits while the vault still holds
+    ///      ETH), the shortfall is sold from the risky leg at the emergency
+    ///      bound, with a small margin so slippage cannot leave the transfer
+    ///      short. Settlement prices at the vault reflect any cost paid.
     function freeAssets(uint256 amountWad) external onlyVault {
-        safeLeg.provide(amountWad, vault);
-        emit AssetsFreed(amountWad);
+        uint256 safeVal = safeLeg.value();
+        if (amountWad > safeVal) {
+            uint256 shortfall = (amountWad - safeVal) * 10_250 / 10_000;
+            uint256 riskyVal = riskyLeg.value();
+            if (shortfall > riskyVal) shortfall = riskyVal;
+            if (shortfall > 0) _sellRisky(shortfall, 150);
+        }
+        uint256 available = FixedPointMathLib.min(amountWad, safeLeg.value());
+        safeLeg.provide(available, vault);
+        emit AssetsFreed(available);
     }
 
     // ---------- composition maintenance (keeper) ----------
@@ -112,6 +128,7 @@ contract ExecutionModule is IExecutionModule, Ownable {
         uint256 wstUsd = priceSource.wstethUsdWad();
 
         if (currentWad < targetWad) {
+            if (!priceSource.wstethBuyAllowed()) return; // depeg/staleness: no new wstETH
             uint256 moveWad = FixedPointMathLib.min(targetWad - currentWad, maxMoveWad);
             (uint256 wethGot,) = riskyLeg.provide(moveWad, address(this));
             if (wethGot == 0) return;
@@ -192,10 +209,26 @@ contract ExecutionModule is IExecutionModule, Ownable {
         }
     }
 
+    /// @dev After the delta trade, park any remaining free idle in the safe
+    ///      leg so uninvested cash earns the floor rate instead of sitting in
+    ///      the vault. Never runs inside freeAssets (that flow is outbound).
+    function _sweepIdle() internal {
+        uint256 freeWad = _vaultFreeIdleWad();
+        uint256 assets = freeWad / USDC_SCALE;
+        if (assets < 1e6) return; // dust: not worth the PT trade
+        usdc.safeTransferFrom(vault, address(safeLeg), assets);
+        safeLeg.onInflow();
+    }
+
+    /// @dev Idle owed to users is untouchable: pending deposit cash, reserved
+    ///      payouts, AND requested-but-unsettled redemptions at current NAV
+    ///      (else a rebalance between freeAssets and settleEpoch would claw
+    ///      the funding back into the safe leg).
     function _vaultFreeIdleWad() internal view returns (uint256) {
+        IVaultAccounting v = IVaultAccounting(vault);
         uint256 idleWad = SafeTransferLib.balanceOf(usdc, vault) * USDC_SCALE;
-        uint256 owedWad =
-            IVaultAccounting(vault).totalPendingDepositsWad() + IVaultAccounting(vault).totalReservedPayoutsWad();
+        uint256 owedWad = v.totalPendingDepositsWad() + v.totalReservedPayoutsWad()
+            + v.totalPendingRedeemShares().mulWad(v.navPerShare());
         return idleWad > owedWad ? idleWad - owedWad : 0;
     }
 }

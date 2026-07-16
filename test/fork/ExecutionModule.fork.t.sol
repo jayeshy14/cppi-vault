@@ -35,6 +35,10 @@ contract ChainlinkPriceSource is IPriceSource {
     function wstethUsdWad() external view returns (uint256) {
         return ethUsdWad() * WSTETH.stEthPerToken() / 1e18;
     }
+
+    function wstethBuyAllowed() external pure returns (bool) {
+        return true;
+    }
 }
 
 contract ExecutionModuleForkTest is Test {
