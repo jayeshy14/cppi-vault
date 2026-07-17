@@ -36,8 +36,12 @@ contract RiskyLegManager is ILeg, Ownable {
     error AboveCap();
     error InsufficientValue();
 
-    modifier onlyFlow() {
-        if (msg.sender != executor && msg.sender != keeper && msg.sender != owner()) revert NotAuthorized();
+    /// @dev Value routing to a caller-chosen recipient. Excludes the keeper by
+    ///      design: a hot key must never move risky-leg tokens to an arbitrary
+    ///      address. The executor is the only legitimate caller (composition
+    ///      trims and de-risk sells both originate there).
+    modifier onlyRouter() {
+        if (msg.sender != executor && msg.sender != owner()) revert NotAuthorized();
         _;
     }
 
@@ -78,7 +82,7 @@ contract RiskyLegManager is ILeg, Ownable {
     /// @notice Hand tokens worth `amountWad` USD to `to` (the executor, which
     ///         swaps them to the deposit asset). WETH leaves first; wstETH is
     ///         the reserve for when WETH is exhausted.
-    function provide(uint256 amountWad, address to) external onlyFlow returns (uint256 wethOut, uint256 wstethOut) {
+    function provide(uint256 amountWad, address to) external onlyRouter returns (uint256 wethOut, uint256 wstethOut) {
         uint256 ethUsd = priceSource.ethUsdWad();
         uint256 wstUsd = priceSource.wstethUsdWad();
         uint256 total = _wethBal().mulWad(ethUsd) + _wstethBal().mulWad(wstUsd);
@@ -100,7 +104,7 @@ contract RiskyLegManager is ILeg, Ownable {
     }
 
     /// @notice Hand a specific token to the executor for composition trims.
-    function provideToken(address token, uint256 amount, address to) external onlyFlow {
+    function provideToken(address token, uint256 amount, address to) external onlyRouter {
         if (token != weth && token != wsteth) revert NotAuthorized();
         token.safeTransfer(to, amount);
     }

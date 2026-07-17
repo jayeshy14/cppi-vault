@@ -43,7 +43,19 @@ contract SafeLegManager is ILeg, Ownable {
     error BadBands();
     error InsufficientValue();
 
-    modifier onlyFlow() {
+    /// @dev Value routing to a caller-chosen recipient. Excludes the keeper:
+    ///      a hot automation key must never be able to send funds to an
+    ///      arbitrary address. Every legitimate caller is the executor or vault.
+    modifier onlyRouter() {
+        if (msg.sender != vault && msg.sender != executor && msg.sender != owner()) {
+            revert NotAuthorized();
+        }
+        _;
+    }
+
+    /// @dev Recipient-less maintenance (funds only move between buffer and PT).
+    ///      Safe for the keeper to call; a compromise here grands no custody.
+    modifier onlyOps() {
         if (msg.sender != vault && msg.sender != executor && msg.sender != keeper && msg.sender != owner()) {
             revert NotAuthorized();
         }
@@ -89,7 +101,7 @@ contract SafeLegManager is ILeg, Ownable {
 
     /// @notice Allocate assets already transferred to this contract: refill
     ///         the buffer to target, buy PT with the rest.
-    function onInflow() external onlyFlow {
+    function onInflow() external onlyOps {
         uint256 buf = bufferWad();
         uint256 target = _bandWad(bufferTargetBps);
         uint256 toPtWad;
@@ -109,7 +121,7 @@ contract SafeLegManager is ILeg, Ownable {
     /// @dev PT sale proceeds can be below amount requested (duration risk /
     ///      slippage); the shortfall reduces delivered assets, never reverts,
     ///      so the emergency path cannot be blocked by PT market conditions.
-    function provide(uint256 amountWad, address to) external onlyFlow returns (uint256 deliveredAssets) {
+    function provide(uint256 amountWad, address to) external onlyRouter returns (uint256 deliveredAssets) {
         if (amountWad > value()) revert InsufficientValue();
 
         uint256 buf = bufferWad();
@@ -138,7 +150,7 @@ contract SafeLegManager is ILeg, Ownable {
 
     /// @notice Keeper maintenance: pull the buffer back inside its bands.
     ///         Above max: spill excess into PT. Below min: top up from PT.
-    function rebalanceBuffer() external onlyFlow {
+    function rebalanceBuffer() external onlyOps {
         uint256 buf = bufferWad();
         uint256 target = _bandWad(bufferTargetBps);
         if (buf > _bandWad(bufferMaxBps)) {
