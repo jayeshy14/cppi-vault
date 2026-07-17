@@ -65,17 +65,17 @@ contract ExecutionLayerTest is Test {
     function test_riskyProvide_wethFirst_wstethReserve() public {
         weth.mint(address(riskyLeg), 10e18); // 20,000
         wsteth.mint(address(riskyLeg), 5e18); // 12,000
-        vm.prank(keeper);
-        (uint256 w, uint256 ws) = riskyLeg.provide(26_000e18, keeper);
+        vm.prank(address(exec));
+        (uint256 w, uint256 ws) = riskyLeg.provide(26_000e18, address(exec));
         assertEq(w, 10e18); // all WETH first (20,000)
         assertEq(ws, 2.5e18); // 6,000 of wstETH at 2400
     }
 
     function test_riskyProvide_revertsBeyondValue() public {
         weth.mint(address(riskyLeg), 1e18);
-        vm.prank(keeper);
+        vm.prank(address(exec));
         vm.expectRevert(RiskyLegManager.InsufficientValue.selector);
-        riskyLeg.provide(3000e18, keeper);
+        riskyLeg.provide(3000e18, address(exec));
     }
 
     function test_wstethTarget_capEnforced() public {
@@ -176,6 +176,18 @@ contract ExecutionLayerTest is Test {
         vm.prank(keeper);
         exec.rebalanceComposition(100_000e18, 50);
         assertApproxEqRel(riskyLeg.wstethShareBps(), 1000, 0.02e18);
+    }
+
+    // ---------- H4 regression: risky leg keeper least-privilege ----------
+
+    function test_h4_keeperCannotDrainRiskyLeg() public {
+        weth.mint(address(riskyLeg), 10e18);
+        vm.prank(keeper);
+        vm.expectRevert(RiskyLegManager.NotAuthorized.selector);
+        riskyLeg.provide(1000e18, keeper);
+        vm.prank(keeper);
+        vm.expectRevert(RiskyLegManager.NotAuthorized.selector);
+        riskyLeg.provideToken(address(weth), 1e18, keeper);
     }
 
     // ---------- access control ----------

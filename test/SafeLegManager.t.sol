@@ -189,6 +189,37 @@ contract SafeLegManagerTest is Test {
         assertEq(manager.bufferTargetBps(), 200);
     }
 
+    // ---------- H4 regression: keeper least-privilege ----------
+
+    function test_h4_keeperCannotRouteFundsToArbitraryAddress() public {
+        _inflow(100e6); // buffer 30, pt 70
+        // the keeper is a hot automation key: it must NOT be able to send the
+        // safe leg to an attacker address via provide()
+        vm.prank(keeper);
+        vm.expectRevert(SafeLegManager.NotAuthorized.selector);
+        manager.provide(100e18, keeper);
+    }
+
+    function test_h4_keeperRetainsRecipientlessMaintenance() public {
+        // keeper may still run maintenance (funds only move buffer<->PT)
+        usdc.mint(address(manager), 100e6);
+        vm.prank(keeper);
+        manager.onInflow();
+        assertEq(manager.bufferWad(), 30e18);
+
+        usdc.mint(address(manager), 30e6); // buffer 60 > max 50
+        vm.prank(keeper);
+        manager.rebalanceBuffer();
+        assertEq(manager.bufferWad(), 30e18);
+    }
+
+    function test_h4_executorStillRoutes() public {
+        _inflow(100e6);
+        vm.prank(executor);
+        uint256 out = manager.provide(50e18, executor);
+        assertEq(out, 50e6);
+    }
+
     /// forge-config: default.fuzz.runs = 512
     function testFuzz_valueConservation_noHaircut(uint96 inflowAssets, uint96 provideWad) public {
         uint256 assets = bound(uint256(inflowAssets), 1e6, 500e6);
