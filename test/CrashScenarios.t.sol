@@ -257,4 +257,46 @@ contract CrashScenariosTest is Test {
         _try(makeAddr("rando"));
         assertGe(vault.shareholderNav() + 1e15, controller.lastFloor());
     }
+
+    // ---------- H6 regression: emergency de-risk survives a stale oracle ----
+
+    function test_h6_emergencyDeRiskNotBrickedByStaleOracle() public {
+        // wire a real OracleHub as the health source and let its feed go stale
+        MockFeed feed = new MockFeed();
+        MockWstRate wr = new MockWstRate();
+        MockPool pool = new MockPool();
+        pool.setRatioWad(1.2e18);
+        OracleHub hub = new OracleHub(address(feed), address(wr), address(pool), true, owner);
+        hub.refresh();
+        vm.prank(owner);
+        vault.setHealthSource(IOracleHealth(address(hub)));
+        vm.warp(block.timestamp + 3 hours); // feed stale -> degraded
+
+        // execution costs 3% on BOTH fee tiers: exceeds the tight 150bps
+        // emergency bound but is inside the 1000bps degraded bound
+        router.setTier(500, 300, false);
+        router.setTier(3000, 300, false);
+
+        // crash: emergency fires; a stranger de-risks permissionlessly
+        prices.setEth(ETH0 * 60 / 100);
+        vm.prank(makeAddr("rando"));
+        vault.rebalance(); // must NOT revert: degraded bound accommodates 3%
+
+        // exposure was actually reduced (de-risk executed), floor defended
+        uint256 nav = vault.shareholderNav();
+        assertLt(riskyLeg.value() * 1e18 / nav, 0.2e18);
+        assertGe(nav + 1e15, controller.lastFloor());
+    }
+
+    function test_h6_tightBoundStillProtectsWhenHealthy() public {
+        // same 3% execution cost but oracle HEALTHY: the tight 150bps bound
+        // must reject the sandwiched fill (MEV protection preserved)
+        router.setTier(500, 300, false);
+        router.setTier(3000, 300, false);
+        vm.warp(block.timestamp + 2 hours);
+        prices.setEth(ETH0 * 60 / 100);
+        vm.prank(makeAddr("rando"));
+        vm.expectRevert(); // both tiers miss the 150bps minOut
+        vault.rebalance();
+    }
 }
