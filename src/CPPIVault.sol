@@ -59,6 +59,12 @@ contract CPPIVault is ERC20, Ownable {
 
     uint256 internal constant SCHEDULED_SLIPPAGE_BPS = 50;
     uint256 internal constant EMERGENCY_SLIPPAGE_BPS = 150;
+    /// @dev Wider bound used for an emergency de-risk while the oracle is
+    ///      unhealthy (audit H6). A stale feed serves a last-good price that
+    ///      lags a fast fall; the tight 150bps bound would then make the swap
+    ///      unfillable and brick the very defense it must run. Executing at a
+    ///      wider bound during a genuine feed outage beats not de-risking.
+    uint256 internal constant EMERGENCY_DEGRADED_SLIPPAGE_BPS = 1000;
 
     // ---------- async accounting ----------
 
@@ -431,7 +437,14 @@ contract CPPIVault is ERC20, Ownable {
         }
 
         int256 deltaWad = int256(a.targetRisky) - int256(riskyLeg.value());
-        uint256 bound = trigger == RebalancePolicy.Trigger.Emergency ? EMERGENCY_SLIPPAGE_BPS : SCHEDULED_SLIPPAGE_BPS;
+        uint256 bound;
+        if (trigger == RebalancePolicy.Trigger.Emergency) {
+            // relax the bound while the oracle is degraded so a lagging feed
+            // cannot brick the permissionless de-risk (audit H6)
+            bound = _oracleDegraded() ? EMERGENCY_DEGRADED_SLIPPAGE_BPS : EMERGENCY_SLIPPAGE_BPS;
+        } else {
+            bound = SCHEDULED_SLIPPAGE_BPS;
+        }
         executor.executeRebalance(deltaWad, bound);
         controller.recordRebalance(trigger, a.floor, a.targetRisky);
         emit Rebalanced(trigger, deltaWad, a.floor, a.targetRisky);
@@ -466,6 +479,10 @@ contract CPPIVault is ERC20, Ownable {
 
     function _requireOracleHealthy() internal view {
         if (address(healthSource) != address(0) && !healthSource.healthy()) revert OracleUnhealthy();
+    }
+
+    function _oracleDegraded() internal view returns (bool) {
+        return address(healthSource) != address(0) && !healthSource.healthy();
     }
 
     function _idleWad() internal view returns (uint256) {

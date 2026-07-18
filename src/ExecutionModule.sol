@@ -19,8 +19,11 @@ interface IVaultAccounting {
 /// @title ExecutionModule
 /// @notice Routes every value flow between the legs through Uniswap V3 with
 ///         oracle-anchored slippage bounds. Atomic by construction: no async
-///         dependency anywhere, so the permissionless emergency rebalance is
-///         never blocked (spec invariant 5).
+///         dependency anywhere on the emergency path. The vault widens the
+///         emergency bound while the oracle is degraded (audit H6) so a
+///         lagging feed cannot brick the de-risk; a swap can still revert if
+///         no venue can fill within the (widened) bound, which is the market
+///         genuinely gapping past a fair exit, i.e. the >1/m gap case.
 /// @dev Buy-side funding order: the vault's FREE idle first (settled deposit
 ///      cash awaiting allocation; pending-deposit and reserved-payout cash is
 ///      never touched), then the safe leg. Sell proceeds always land in the
