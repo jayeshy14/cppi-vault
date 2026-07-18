@@ -27,12 +27,34 @@ contract MockPTAdapter is IPTAdapter {
         haircutBps = bps;
     }
 
+    bool public failDeposit;
+    bool public failWithdraw;
+    bool public failValue;
+
+    function setFailDeposit(bool v) external {
+        failDeposit = v;
+    }
+
+    function setFailWithdraw(bool v) external {
+        failWithdraw = v;
+    }
+
+    function setFailValue(bool v) external {
+        failValue = v;
+    }
+
     function value() external view returns (uint256) {
+        require(!failValue, "oracle down");
         return valueWad;
     }
 
     function deposit(uint256 assets) external {
+        require(!failDeposit, "PT market dislocated");
         valueWad += assets * 1e12;
+    }
+
+    function reclaim(uint256 amount, address to) external {
+        usdc.safeTransfer(to, amount);
     }
 
     /// @dev The real PT accretes toward par; this mock does not. Scenario
@@ -43,6 +65,7 @@ contract MockPTAdapter is IPTAdapter {
     }
 
     function withdraw(uint256 amountWad, address to) external returns (uint256 assetsOut) {
+        require(!failWithdraw, "PT slippage exceeded");
         valueWad -= amountWad;
         assetsOut = (amountWad * (10_000 - haircutBps) / 10_000) / 1e12;
         usdc.safeTransfer(to, assetsOut);
@@ -146,11 +169,44 @@ contract SafeLegManagerTest is Test {
         assertEq(out, 49.7e6);
     }
 
-    function test_provide_revertsBeyondValue() public {
-        _inflow(100e6);
+    function test_provide_beyondValue_bestEffortNoRevert() public {
+        _inflow(100e6); // total value 100
+        // ask for more than the leg holds: delivers all available, never reverts
         vm.prank(executor);
-        vm.expectRevert(SafeLegManager.InsufficientValue.selector);
-        manager.provide(101e18, executor);
+        uint256 out = manager.provide(101e18, executor);
+        assertEq(out, 100e6);
+        assertEq(manager.value(), 0);
+    }
+
+    // ---------- M1/M2 regression: PT reverts never brick the flow ----------
+
+    function test_m1_ptWithdrawRevert_deliversBufferBestEffort() public {
+        _inflow(100e6); // buffer 30, pt 70
+        pt.setFailWithdraw(true); // PT sale reverts (can't meet its bound)
+        // provide must not revert; it delivers the buffer portion
+        vm.prank(executor);
+        uint256 out = manager.provide(50e18, executor);
+        assertEq(out, 20e6); // 20 from buffer (down to min); PT best-effort
+    }
+
+    function test_m1_bufferOnlyPath_isOracleFree() public {
+        _inflow(100e6); // buffer 30, pt 70
+        pt.setFailValue(true); // pt.value() (oracle) would revert
+        // a request that fits the deliverable buffer must not touch the oracle
+        vm.prank(executor);
+        uint256 out = manager.provide(15e18, executor);
+        assertEq(out, 15e6);
+    }
+
+    function test_m2_onInflowPtBuyRevert_leavesAssetsInBuffer() public {
+        pt.setFailDeposit(true); // Pendle market dislocated
+        usdc.mint(address(manager), 100e6);
+        vm.prank(keeper);
+        manager.onInflow(); // must not revert
+        // assets stayed in the buffer instead of stranding at the adapter
+        assertEq(manager.bufferWad(), 100e18);
+        assertEq(pt.valueWad(), 0);
+        assertEq(manager.value(), 100e18);
     }
 
     function test_bufferRebalance_spillsAboveMax() public {

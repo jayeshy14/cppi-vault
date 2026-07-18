@@ -155,6 +155,22 @@ contract ExecutionLayerTest is Test {
         assertEq(usdc.balanceOf(address(vault)), 40e6);
     }
 
+    function test_l4_freeAssets_deliversSafePortionWhenRiskySaleReverts() public {
+        // safe leg holds 40 (buffer), risky leg holds WETH; ask for 60 so a
+        // risky shortfall sale is needed
+        usdc.mint(address(safeLeg), 40e6);
+        weth.mint(address(riskyLeg), 5e18); // 10,000 of ETH exposure
+        // both swap tiers disabled: the risky sale cannot clear
+        router.setTier(500, 0, true);
+        router.setTier(3000, 0, true);
+
+        vm.prank(address(vault));
+        exec.freeAssets(60e18); // must NOT revert
+
+        // the safe-leg portion was still delivered
+        assertEq(usdc.balanceOf(address(vault)), 40e6);
+    }
+
     function test_composition_movesTowardTarget() public {
         vm.prank(owner);
         riskyLeg.setWstethTarget(2500); // 25%

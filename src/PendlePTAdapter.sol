@@ -58,6 +58,7 @@ contract PendlePTAdapter is IPTAdapter, Ownable {
 
     address public manager; // SafeLegManager, set once
     uint256 public maxSlippageBps = 50;
+    uint256 public approxWindowBps = 1000; // PT-buy search window above expected
 
     uint256 internal constant YEAR = 365 days;
 
@@ -109,6 +110,20 @@ contract PendlePTAdapter is IPTAdapter, Ownable {
         if (bps > 500) revert BadSlippage();
         maxSlippageBps = bps;
         emit SlippageSet(bps);
+    }
+
+    /// @notice Width of the PT-buy binary-search window above the expected fill
+    ///         (bps). Wider tolerates larger spot-vs-TWAP divergence before the
+    ///         router search range reverts (audit M2). Bounded to keep the
+    ///         search from overflowing router math.
+    function setApproxWindowBps(uint256 bps) external onlyOwner {
+        if (bps < 100 || bps > 5000) revert BadSlippage();
+        approxWindowBps = bps;
+    }
+
+    /// @notice Return un-deposited deposit asset to the manager (audit M2).
+    function reclaim(uint256 amount, address to) external onlyManager {
+        asset.safeTransfer(to, amount);
     }
 
     // ---------- IPTAdapter ----------
@@ -204,8 +219,9 @@ contract PendlePTAdapter is IPTAdapter, Ownable {
             swapData: SwapData(SwapType.NONE, address(0), "", false)
         });
         // oracle-anchored search range: the true fill lives near expectedPt,
-        // so a tight window converges fast and cannot overflow router math
-        ApproxParams memory approx = ApproxParams(minPtOut, expectedPt * 110 / 100, 0, 30, 1e14);
+        // so a bounded window converges fast and cannot overflow router math
+        uint256 guessMax = expectedPt * (10_000 + approxWindowBps) / 10_000;
+        ApproxParams memory approx = ApproxParams(minPtOut, guessMax, 0, 30, 1e14);
         (netPtOut,,) = router.swapExactTokenForPt(address(this), market, minPtOut, approx, input, _emptyLimit());
         emit Deposited(assets, netPtOut);
     }
