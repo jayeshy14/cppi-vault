@@ -130,6 +130,11 @@ contract CPPIController {
         return floorState.protectedAmount;
     }
 
+    /// @notice Last computed floor (monotone within a term); invariant hook.
+    function lastFloor() external view returns (uint256) {
+        return floorState.lastFloor;
+    }
+
     function maxSurvivableGapBps() external view returns (uint256) {
         return CPPIMath.maxSurvivableGapBps(multiplierWad);
     }
