@@ -38,6 +38,10 @@ contract CPPIController {
     uint256 internal constant MAX_RATE_STEP_WAD = 0.02e18;
     uint256 internal lastRateWad;
 
+    /// @dev Anti-churn floor on term length (audit H2). Well below the 12-month
+    ///      product term; exists so a compromised keeper cannot loop tiny terms.
+    uint64 public constant MIN_TERM_DURATION = 7 days;
+
     event TermStarted(
         uint64 indexed termNumber, uint64 termStart, uint64 termEnd, uint256 nav, uint256 protectedAmount
     );
@@ -49,6 +53,7 @@ contract CPPIController {
     error TermStillActive();
     error TermNotMatured();
     error ZeroSupply();
+    error TermTooShort();
 
     modifier onlyVault() {
         if (msg.sender != vault) revert NotVault();
@@ -78,6 +83,7 @@ contract CPPIController {
     function startTerm(uint64 termStart, uint64 termEnd, uint256 nav, uint256 supply) external onlyVault {
         if (termActive) revert TermStillActive();
         if (supply == 0) revert ZeroSupply();
+        if (termEnd < termStart + MIN_TERM_DURATION) revert TermTooShort();
         floorConfig.termStart = termStart;
         floorConfig.termEnd = termEnd;
         FloorPolicy.validate(floorConfig);

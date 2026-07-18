@@ -253,19 +253,79 @@ contract VaultIntegrationTest is Test {
         assertApproxEqRel(feeValue, 500e18, 0.02e18);
     }
 
-    function test_performanceFee_onTermGainsAboveProtected() public {
+    function test_performanceFee_onGainsAboveHighWater() public {
         vm.prank(owner);
-        vault.setFees(0, 1000, feeTo); // 10% of gains above the protected amount
+        vault.setFees(0, 1000, feeTo); // 10% above the high-water mark
         _enter(100_000e6);
 
-        prices.setEth(3000e18); // nav ~113.5k, protected 90k, gain ~23.5k
+        prices.setEth(3000e18); // nav ~113.5k; TRUE profit vs 100k start ~13.5k
         vm.warp(block.timestamp + 365 days + 1);
         vm.prank(keeper);
         vault.settleTerm();
 
-        // fee shares self-dilute: value = feeWad x (nav - feeWad) / nav
+        // fee is 10% of REAL profit (nav - startNav), not of nav-above-floor;
+        // slightly less than 1353 after self-dilution of the minted fee shares
         uint256 feeValue = vault.balanceOf(feeTo) * vault.navPerShare() / 1e18;
-        assertApproxEqRel(feeValue, 2_304e18, 0.005e18); // 10% x 23.53k, diluted
+        assertApproxEqRel(feeValue, 1_337e18, 0.01e18); // 10% x ~13.5k, diluted
+    }
+
+    // ---------- H1/H2 regression: fee basis + anti-churn ----------
+
+    function test_h1_noPerfFeeOnFlatTerm() public {
+        vm.prank(owner);
+        vault.setFees(0, 1000, feeTo);
+        _enter(100_000e6);
+        // no price move: navPerShare stays at the high-water mark
+        vm.warp(block.timestamp + 365 days + 1);
+        vm.prank(keeper);
+        vault.settleTerm();
+        assertEq(vault.balanceOf(feeTo), 0); // flat term pays nothing
+    }
+
+    function test_h1_noPerfFeeOnLosingTerm() public {
+        vm.prank(owner);
+        vault.setFees(0, 1000, feeTo);
+        _enter(100_000e6);
+        // ETH drifts down: NAV ends below start but above the floor
+        prices.setEth(1800e18);
+        vm.warp(block.timestamp + 365 days + 1);
+        vm.prank(keeper);
+        vault.settleTerm();
+        assertEq(vault.balanceOf(feeTo), 0); // a losing vault pays no perf fee
+    }
+
+    function test_h1_highWaterHoldsAcrossTerms() public {
+        vm.prank(owner);
+        vault.setFees(0, 1000, feeTo);
+        _enter(100_000e6);
+
+        // term 1: rally, fee charged, HWM ratchets up
+        prices.setEth(3000e18);
+        vm.warp(block.timestamp + 365 days + 1);
+        vm.prank(keeper);
+        vault.settleTerm();
+        uint256 feeAfterTerm1 = vault.balanceOf(feeTo);
+        assertGt(feeAfterTerm1, 0);
+
+        // term 2 at the elevated NAV, then a flat close: no new gain above HWM
+        vm.prank(keeper);
+        vault.startTerm(365 days);
+        vault.rebalance();
+        vm.warp(block.timestamp + 365 days + 1);
+        vm.prank(keeper);
+        vault.settleTerm();
+        assertEq(vault.balanceOf(feeTo), feeAfterTerm1); // no double-charge
+    }
+
+    function test_h2_minTermDuration_blocksChurn() public {
+        _enter(100_000e6);
+        vm.warp(block.timestamp + 365 days + 1);
+        vm.prank(keeper);
+        vault.settleTerm();
+        // a one-second churn term is rejected
+        vm.prank(keeper);
+        vm.expectRevert(CPPIController.TermTooShort.selector);
+        vault.startTerm(1);
     }
 
     function test_feeCaps_enforced() public {
