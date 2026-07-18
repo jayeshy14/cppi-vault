@@ -7,11 +7,15 @@ import {CPPIMath} from "./CPPIMath.sol";
 /// @title FloorPolicy
 /// @notice The floor-policy family for a CPPI vault: Fixed, Step ratchet, and
 ///         TIPP continuous ratchet, expressed as one floor function.
-/// @dev floor = max(PV(protectedAmount, liveRate, timeLeft), policy term),
-///      clamped monotone non-decreasing within a term. The Step policy raises
-///      protectedAmount itself by k whenever NAV reaches T x floor, so the
-///      ratchet survives rate changes and accretion consistently. All values
-///      WAD unless noted.
+/// @dev The floor is stored and computed PER SHARE, not as a whole-vault
+///      aggregate (audit H3). Capital protection is a per-share promise, and
+///      the vault's share supply changes mid-term via epoch settlement; a
+///      per-share floor is invariant to those mint/burn flows, so a mid-term
+///      deposit or redemption can no longer dilute existing holders' floor or
+///      manufacture a phantom shortfall. Callers reconstruct the aggregate
+///      floor as floorPerShare * totalSupply. All values WAD.
+///      floorPerShare = max(PV(protectedPerShare, liveRate, timeLeft), policy),
+///      clamped monotone non-decreasing within a term.
 library FloorPolicy {
     using FixedPointMathLib for uint256;
 
@@ -25,21 +29,21 @@ library FloorPolicy {
         Kind kind;
         uint64 termStart;
         uint64 termEnd;
-        uint256 protectionWad; // P: fraction of term-start NAV promised at maturity
-        uint256 triggerWad; // T (Step only): step fires when nav >= T x floor
-        uint256 stepWad; // k (Step only): protectedAmount multiplier per step
-        uint256 ratchetWad; // TIPP only: floor >= ratchet x high-water NAV
+        uint256 protectionWad; // P: fraction of term-start navPerShare promised at maturity
+        uint256 triggerWad; // T (Step only): step fires when navPerShare >= T x floorPerShare
+        uint256 stepWad; // k (Step only): protectedPerShare multiplier per step
+        uint256 ratchetWad; // TIPP only: floorPerShare >= ratchet x high-water navPerShare
     }
 
     struct State {
-        uint256 protectedAmount; // absolute asset terms; Step raises this
-        uint256 hwmNav; // TIPP high-water NAV
-        uint256 lastFloor; // monotonicity clamp
+        uint256 protectedPerShareWad; // per-share protected amount; Step raises this
+        uint256 hwmNavPerShareWad; // TIPP high-water navPerShare
+        uint256 lastFloorPerShareWad; // monotonicity clamp (per share)
         uint32 stepCount;
     }
 
     /// @dev Bounds one update's step loop; with k >= MIN_STEP a gap large
-    ///      enough to exhaust this cap cannot occur without NAV growing
+    ///      enough to exhaust this cap cannot occur without navPerShare growing
     ///      >= MIN_STEP^MAX_STEPS x floor in a single update.
     uint256 internal constant MAX_STEPS_PER_UPDATE = 10;
     uint256 internal constant MIN_STEP = 1.05e18;
@@ -60,33 +64,33 @@ library FloorPolicy {
         }
     }
 
-    function initialize(State storage s, Config memory c, uint256 termStartNav) internal {
-        s.protectedAmount = termStartNav.mulWad(c.protectionWad);
-        s.hwmNav = termStartNav;
-        s.lastFloor = 0;
+    function initialize(State storage s, Config memory c, uint256 termStartNavPerShare) internal {
+        s.protectedPerShareWad = termStartNavPerShare.mulWad(c.protectionWad);
+        s.hwmNavPerShareWad = termStartNavPerShare;
+        s.lastFloorPerShareWad = 0;
         s.stepCount = 0;
     }
 
-    /// @notice Compute the current floor and apply ratchet state transitions.
-    /// @param nav current vault NAV in asset terms
+    /// @notice Compute the current per-share floor and apply ratchet transitions.
+    /// @param navPerShare current vault NAV per share, WAD
     /// @param rateWad live PT-implied yield (caller clamps per spec section 5)
     /// @param nowTs current timestamp
-    function currentFloor(State storage s, Config memory c, uint256 nav, uint256 rateWad, uint256 nowTs)
+    function currentFloor(State storage s, Config memory c, uint256 navPerShare, uint256 rateWad, uint256 nowTs)
         internal
         returns (uint256 floor)
     {
         uint256 timeLeft = c.termEnd > nowTs ? c.termEnd - nowTs : 0;
-        floor = CPPIMath.floorValue(s.protectedAmount, rateWad, timeLeft);
+        floor = CPPIMath.floorValue(s.protectedPerShareWad, rateWad, timeLeft);
 
         if (c.kind == Kind.Tipp) {
-            if (nav > s.hwmNav) s.hwmNav = nav;
-            uint256 ratchetFloor = s.hwmNav.mulWad(c.ratchetWad);
+            if (navPerShare > s.hwmNavPerShareWad) s.hwmNavPerShareWad = navPerShare;
+            uint256 ratchetFloor = s.hwmNavPerShareWad.mulWad(c.ratchetWad);
             if (ratchetFloor > floor) floor = ratchetFloor;
         } else if (c.kind == Kind.Step) {
             uint256 steps;
-            while (steps < MAX_STEPS_PER_UPDATE && floor != 0 && nav >= floor.mulWad(c.triggerWad)) {
-                s.protectedAmount = s.protectedAmount.mulWad(c.stepWad);
-                floor = CPPIMath.floorValue(s.protectedAmount, rateWad, timeLeft);
+            while (steps < MAX_STEPS_PER_UPDATE && floor != 0 && navPerShare >= floor.mulWad(c.triggerWad)) {
+                s.protectedPerShareWad = s.protectedPerShareWad.mulWad(c.stepWad);
+                floor = CPPIMath.floorValue(s.protectedPerShareWad, rateWad, timeLeft);
                 unchecked {
                     ++steps;
                 }
@@ -95,36 +99,36 @@ library FloorPolicy {
         }
 
         // Monotone within the term: rate moves and policy math may only raise it.
-        if (floor < s.lastFloor) {
-            floor = s.lastFloor;
+        if (floor < s.lastFloorPerShareWad) {
+            floor = s.lastFloorPerShareWad;
         } else {
-            s.lastFloor = floor;
+            s.lastFloorPerShareWad = floor;
         }
     }
 
-    /// @notice View variant: what the floor would be without state transitions.
-    function previewFloor(State memory s, Config memory c, uint256 nav, uint256 rateWad, uint256 nowTs)
+    /// @notice View variant: the per-share floor without state transitions.
+    function previewFloor(State memory s, Config memory c, uint256 navPerShare, uint256 rateWad, uint256 nowTs)
         internal
         pure
         returns (uint256 floor)
     {
         uint256 timeLeft = c.termEnd > nowTs ? c.termEnd - nowTs : 0;
-        floor = CPPIMath.floorValue(s.protectedAmount, rateWad, timeLeft);
+        floor = CPPIMath.floorValue(s.protectedPerShareWad, rateWad, timeLeft);
         if (c.kind == Kind.Tipp) {
-            uint256 hwm = nav > s.hwmNav ? nav : s.hwmNav;
+            uint256 hwm = navPerShare > s.hwmNavPerShareWad ? navPerShare : s.hwmNavPerShareWad;
             uint256 ratchetFloor = hwm.mulWad(c.ratchetWad);
             if (ratchetFloor > floor) floor = ratchetFloor;
         } else if (c.kind == Kind.Step) {
-            uint256 protectedAmount = s.protectedAmount;
+            uint256 protectedPerShare = s.protectedPerShareWad;
             uint256 steps;
-            while (steps < MAX_STEPS_PER_UPDATE && floor != 0 && nav >= floor.mulWad(c.triggerWad)) {
-                protectedAmount = protectedAmount.mulWad(c.stepWad);
-                floor = CPPIMath.floorValue(protectedAmount, rateWad, timeLeft);
+            while (steps < MAX_STEPS_PER_UPDATE && floor != 0 && navPerShare >= floor.mulWad(c.triggerWad)) {
+                protectedPerShare = protectedPerShare.mulWad(c.stepWad);
+                floor = CPPIMath.floorValue(protectedPerShare, rateWad, timeLeft);
                 unchecked {
                     ++steps;
                 }
             }
         }
-        if (floor < s.lastFloor) floor = s.lastFloor;
+        if (floor < s.lastFloorPerShareWad) floor = s.lastFloorPerShareWad;
     }
 }

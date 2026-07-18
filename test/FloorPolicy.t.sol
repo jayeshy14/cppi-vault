@@ -22,7 +22,7 @@ contract FloorPolicyHarness {
     }
 
     function protectedAmount() external view returns (uint256) {
-        return state.protectedAmount;
+        return state.protectedPerShareWad;
     }
 
     function stepCount() external view returns (uint32) {
@@ -30,7 +30,7 @@ contract FloorPolicyHarness {
     }
 
     function hwmNav() external view returns (uint256) {
-        return state.hwmNav;
+        return state.hwmNavPerShareWad;
     }
 }
 
