@@ -379,14 +379,17 @@ contract CPPIVault is ERC20, Ownable {
     // ---------- term lifecycle ----------
 
     function startTerm(uint64 duration) external onlyKeeper {
-        controller.startTerm(uint64(block.timestamp), uint64(block.timestamp) + duration, shareholderNav());
+        controller.startTerm(
+            uint64(block.timestamp), uint64(block.timestamp) + duration, shareholderNav(), totalSupply()
+        );
     }
 
     function settleTerm() external onlyKeeper returns (uint256 shortfall) {
         _accrueManagementFee();
-        uint256 protectedAmount = controller.protectedAmount();
+        uint256 supply = totalSupply();
+        uint256 protectedAmount = controller.protectedAmount(supply);
         uint256 nav = shareholderNav();
-        shortfall = controller.settleTerm(nav);
+        shortfall = controller.settleTerm(nav, supply);
         if (performanceFeeBps > 0 && feeRecipient != address(0) && nav > protectedAmount) {
             uint256 gainWad = nav - protectedAmount;
             uint256 feeWad = gainWad * performanceFeeBps / 10_000;
@@ -402,7 +405,8 @@ contract CPPIVault is ERC20, Ownable {
     ///         keeper-gated; Emergency is permissionless and works while
     ///         paused (spec invariant 5).
     function rebalance() external returns (RebalancePolicy.Trigger trigger) {
-        CPPIController.Assessment memory a = controller.assess(shareholderNav(), riskyLeg.value(), rateOracle.rateWad());
+        CPPIController.Assessment memory a =
+            controller.assess(shareholderNav(), totalSupply(), riskyLeg.value(), rateOracle.rateWad());
         trigger = a.trigger;
         if (trigger == RebalancePolicy.Trigger.None) revert NoTrigger();
         if (trigger == RebalancePolicy.Trigger.Scheduled && msg.sender != keeper && msg.sender != owner()) {

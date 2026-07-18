@@ -49,6 +49,7 @@ contract VaultIntegrationTest is Test {
     address keeper = makeAddr("keeper");
     address guardian = makeAddr("guardian");
     address alice = makeAddr("alice");
+    address bob = makeAddr("bob");
     address feeTo = makeAddr("feeTo");
 
     function setUp() public {
@@ -95,10 +96,65 @@ contract VaultIntegrationTest is Test {
         usdc.mint(alice, 1_000_000e6);
         vm.prank(alice);
         usdc.approve(address(vault), type(uint256).max);
+        usdc.mint(bob, 1_000_000e6);
+        vm.prank(bob);
+        usdc.approve(address(vault), type(uint256).max);
         // router float
         usdc.mint(address(router), 10_000_000e6);
         weth.mint(address(router), 10_000e18);
         wsteth.mint(address(router), 10_000e18);
+    }
+
+    // ---------- H3 regression: per-share floor is supply-invariant ----------
+
+    function test_h3_midTermDeposit_preservesPerShareFloor() public {
+        _enter(100_000e6);
+        // per-share protection at term start
+        uint256 protectedPerShare0 = controller.protectedPerShareWad();
+        uint256 supply0 = vault.totalSupply();
+        assertApproxEqRel(protectedPerShare0, 0.9e18, 0.001e18); // 90% of navPerShare (=1)
+
+        // a mid-term depositor settles: mints shares while the term is live
+        vm.prank(bob);
+        vault.requestDeposit(100_000e6);
+        vm.prank(keeper);
+        vault.settleEpoch();
+
+        // per-share protection is UNCHANGED (the H3 bug halved it)
+        assertEq(controller.protectedPerShareWad(), protectedPerShare0);
+        // aggregate protection scaled up with supply, not frozen
+        uint256 supply1 = vault.totalSupply();
+        assertGt(supply1, supply0);
+        assertApproxEqRel(
+            controller.protectedAmount(supply1), controller.protectedAmount(supply0) * supply1 / supply0, 0.0001e18
+        );
+    }
+
+    function test_h3_midTermRedeem_noPhantomShortfall() public {
+        _enter(100_000e6);
+        uint256 protectedPerShare0 = controller.protectedPerShareWad();
+
+        // half the holder redeems mid-term at fair NAV
+        uint256 half = vault.balanceOf(alice) / 2;
+        vm.prank(alice);
+        vault.requestRedeem(half);
+        uint256 needWad = half * vault.navPerShare() / 1e18;
+        vm.prank(keeper);
+        vault.freeAssets(needWad * 10_100 / 10_000);
+        vm.prank(keeper);
+        vault.settleEpoch();
+        vm.prank(alice);
+        vault.claimAssets();
+
+        // per-share floor unchanged, aggregate scaled down (no phantom breach)
+        assertEq(controller.protectedPerShareWad(), protectedPerShare0);
+
+        // at maturity: zero shortfall despite the mid-term supply halving
+        // (inject the PT carry the mock omits so the safe leg accretes to par)
+        pt.simulateYield(3_000e18);
+        vm.warp(block.timestamp + 366 days);
+        vm.prank(keeper);
+        assertEq(vault.settleTerm(), 0);
     }
 
     function _enter(uint256 assets) internal {
