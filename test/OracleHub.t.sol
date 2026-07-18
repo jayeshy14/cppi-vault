@@ -97,16 +97,25 @@ contract OracleHubTest is Test {
         hub.refresh();
     }
 
-    function test_basisBreach_marksLower_blocksBuys() public {
-        // pool prints wstETH 5% below the exchange rate (depeg scenario)
-        pool.setRatioWad(1.14e18);
-        assertApproxEqRel(hub.wstethUsdWad(), 2280e18, 1e6); // marked at pool (lower)
-        assertFalse(hub.wstethBuyAllowed());
+    function test_h5_basisBreach_marksAtRate_blocksBuys() public {
+        // H5: the VALUE mark is always the exchange rate, never the pool spot,
+        // so a manipulated/depegged pool cannot skew NAV/share pricing. A basis
+        // breach only flips the buy gate (fail-safe, blocks buying more wstETH).
+        pool.setRatioWad(1.14e18); // pool 5% below the exchange rate (depeg)
+        assertApproxEqRel(hub.wstethUsdWad(), 2400e18, 1e6); // still exchange-rate
+        assertFalse(hub.wstethBuyAllowed()); // but buys are blocked
 
-        // exchange rate lower than pool: still marks the lower one
-        pool.setRatioWad(1.32e18);
-        assertApproxEqRel(hub.wstethUsdWad(), 2400e18, 1e6); // rate-based is lower
+        pool.setRatioWad(1.32e18); // pool above the exchange rate
+        assertApproxEqRel(hub.wstethUsdWad(), 2400e18, 1e6); // still exchange-rate
         assertFalse(hub.wstethBuyAllowed());
+    }
+
+    function test_h5_poolPushDownCannotLowerTheMark() public {
+        // the attack: push the pool spot far down to depress the wstETH mark
+        // and mint extra shares cheaply. Under the fix the mark does not move.
+        uint256 markBefore = hub.wstethUsdWad();
+        pool.setRatioWad(0.5e18); // extreme flash-manipulated spot
+        assertEq(hub.wstethUsdWad(), markBefore); // unaffected
     }
 
     function test_smallBasis_usesExchangeRate() public {

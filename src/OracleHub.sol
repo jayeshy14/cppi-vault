@@ -105,16 +105,16 @@ contract OracleHub is IPriceSource, IRateOracle, Ownable {
         return snapshotEthUsdWad; // degraded: last-good so floor defense continues
     }
 
-    /// @notice wstETH marked at the LOWER of exchange-rate and pool-spot
-    ///         valuations whenever they disagree beyond the basis limit.
+    /// @notice wstETH marked at the Lido exchange rate (stEthPerToken x
+    ///         ETH/USD), NOT the DEX spot (audit H5). The exchange rate is the
+    ///         fundamental redemption value and, unlike a UniV3 slot0 read, is
+    ///         not flash-loan manipulable, so it cannot be used to skew share
+    ///         pricing at settlement. This is the standard wstETH-collateral
+    ///         marking (Aave/Morpho). The pool spot is kept only as a depeg
+    ///         gate on BUYING more wstETH (wstethBuyAllowed), where a pushed
+    ///         spot is fail-safe: it can only block a buy, never inflate value.
     function wstethUsdWad() external view returns (uint256) {
-        uint256 eth = ethUsdWad();
-        uint256 rateBased = wsteth.stEthPerToken().mulWad(eth);
-        uint256 poolBased = _poolWethPerWsteth().mulWad(eth);
-        if (_basisBps(rateBased, poolBased) > maxBasisBps) {
-            return FixedPointMathLib.min(rateBased, poolBased);
-        }
-        return rateBased;
+        return wsteth.stEthPerToken().mulWad(ethUsdWad());
     }
 
     function wstethBuyAllowed() external view returns (bool) {
