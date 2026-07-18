@@ -46,7 +46,12 @@ contract CPPIVault is ERC20, Ownable {
 
     // fees: caps enforced in code, zero by default (curator loss-leader norm)
     uint16 public managementFeeBps; // per year, on shareholder NAV
-    uint16 public performanceFeeBps; // on term gains above the protected amount
+    uint16 public performanceFeeBps; // on gains in navPerShare above the high-water mark
+    /// @dev Per-share high-water mark: the highest navPerShare a performance
+    ///      fee has been charged at. The fee applies only to gains above it,
+    ///      so flat/losing terms and re-struck short terms pay nothing (audit
+    ///      H1/H2). Initialized at the first startTerm.
+    uint256 public highWaterPerShareWad;
     address public feeRecipient;
     uint64 public lastMgmtAccrualAt;
     uint16 public constant MAX_MANAGEMENT_FEE_BPS = 200;
@@ -379,21 +384,33 @@ contract CPPIVault is ERC20, Ownable {
     // ---------- term lifecycle ----------
 
     function startTerm(uint64 duration) external onlyKeeper {
+        // seed the high-water mark at the first term's entry navPerShare so the
+        // performance fee is measured from real principal, not from zero
+        if (highWaterPerShareWad == 0) highWaterPerShareWad = navPerShare();
         controller.startTerm(
             uint64(block.timestamp), uint64(block.timestamp) + duration, shareholderNav(), totalSupply()
         );
     }
 
+    /// @dev Performance fee is charged only on the rise in navPerShare above
+    ///      the per-share high-water mark, then the mark ratchets up. Flat or
+    ///      losing terms, and re-struck short terms where navPerShare has not
+    ///      advanced, pay nothing (audit H1/H2). Deposits never move
+    ///      navPerShare (they mint at price), so the per-share basis is clean.
     function settleTerm() external onlyKeeper returns (uint256 shortfall) {
         _accrueManagementFee();
         uint256 supply = totalSupply();
-        uint256 protectedAmount = controller.protectedAmount(supply);
         uint256 nav = shareholderNav();
         shortfall = controller.settleTerm(nav, supply);
-        if (performanceFeeBps > 0 && feeRecipient != address(0) && nav > protectedAmount) {
-            uint256 gainWad = nav - protectedAmount;
+        if (performanceFeeBps == 0 || feeRecipient == address(0) || supply == 0) return shortfall;
+
+        uint256 navPS = navPerShare();
+        uint256 hwm = highWaterPerShareWad;
+        if (navPS > hwm) {
+            uint256 gainWad = (navPS - hwm).mulWad(supply);
             uint256 feeWad = gainWad * performanceFeeBps / 10_000;
-            uint256 feeShares = feeWad.divWad(navPerShare());
+            uint256 feeShares = feeWad.divWad(navPS);
+            highWaterPerShareWad = navPS; // ratchet the mark up
             _mint(feeRecipient, feeShares);
             emit PerformanceFeeCharged(feeShares, gainWad);
         }
