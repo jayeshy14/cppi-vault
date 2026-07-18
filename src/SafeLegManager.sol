@@ -108,33 +108,52 @@ contract SafeLegManager is ILeg, Ownable {
         if (buf > target) {
             toPtWad = buf - target;
             uint256 assets = toPtWad / assetScale;
-            if (assets > 0) {
-                asset.safeTransfer(address(pt), assets);
-                pt.deposit(assets);
-            }
+            if (assets > 0) _buyPtBestEffort(assets);
         }
         emit Inflow(buf, buf - toPtWad, toPtWad);
     }
 
-    /// @notice Deliver `amountWad` of deposit asset to `to`: buffer down to
-    ///         its minimum band first, PT for the remainder.
-    /// @dev PT sale proceeds can be below amount requested (duration risk /
-    ///      slippage); the shortfall reduces delivered assets, never reverts,
-    ///      so the emergency path cannot be blocked by PT market conditions.
-    function provide(uint256 amountWad, address to) external onlyRouter returns (uint256 deliveredAssets) {
-        if (amountWad > value()) revert InsufficientValue();
+    /// @dev Move `assets` into PT, but never revert the caller if the Pendle
+    ///      market is dislocated (audit M2): on failure the assets are pulled
+    ///      back to the buffer. onInflow runs inside the permissionless
+    ///      emergency rebalance, so a PT-buy revert must not unwind the
+    ///      de-risk. Returns whether the buy succeeded.
+    function _buyPtBestEffort(uint256 assets) internal returns (bool) {
+        asset.safeTransfer(address(pt), assets);
+        try pt.deposit(assets) {
+            return true;
+        } catch {
+            pt.reclaim(assets, address(this));
+            return false;
+        }
+    }
 
+    /// @notice Deliver up to `amountWad` of deposit asset to `to`: buffer down
+    ///         to its minimum band first, PT for the remainder. Best-effort and
+    ///         never reverts on PT conditions (audit M1).
+    /// @dev A request that fits the deliverable buffer takes an oracle-free
+    ///      fast path (no pt.value() read), so a Pendle-oracle outage cannot
+    ///      block a buffer-only payout. When PT is needed, the withdraw is
+    ///      wrapped: if the Pendle market cannot fill within its slippage
+    ///      bound, the buffer portion is still delivered and the shortfall
+    ///      simply reduces `deliveredAssets`, so the emergency de-risk and
+    ///      redemption funding are never bricked by PT market conditions.
+    function provide(uint256 amountWad, address to) external onlyRouter returns (uint256 deliveredAssets) {
         uint256 buf = bufferWad();
         uint256 minBuf = _bandWad(bufferMinBps);
         uint256 fromBuffer = buf > minBuf ? buf - minBuf : 0;
         if (fromBuffer > amountWad) fromBuffer = amountWad;
-        // if PT cannot cover the remainder, dig into the protected buffer band
+
         uint256 fromPt = amountWad - fromBuffer;
-        uint256 ptValue = pt.value();
-        if (fromPt > ptValue) {
-            uint256 extra = fromPt - ptValue;
-            fromPt = ptValue;
-            fromBuffer = fromBuffer + extra > buf ? buf : fromBuffer + extra;
+        if (fromPt > 0) {
+            // only now touch the PT/oracle path
+            uint256 ptValue = pt.value();
+            if (fromPt > ptValue) {
+                // PT cannot cover the remainder: dig into the protected band
+                uint256 extra = fromPt - ptValue;
+                fromPt = ptValue;
+                fromBuffer = fromBuffer + extra > buf ? buf : fromBuffer + extra;
+            }
         }
 
         if (fromBuffer > 0) {
@@ -143,7 +162,11 @@ contract SafeLegManager is ILeg, Ownable {
             deliveredAssets = assets;
         }
         if (fromPt > 0) {
-            deliveredAssets += pt.withdraw(fromPt, to);
+            try pt.withdraw(fromPt, to) returns (uint256 got) {
+                deliveredAssets += got;
+            } catch {
+                // PT market could not fill within its bound; deliver buffer only
+            }
         }
         emit Provided(to, amountWad, fromBuffer, fromPt);
     }
@@ -156,9 +179,7 @@ contract SafeLegManager is ILeg, Ownable {
         if (buf > _bandWad(bufferMaxBps)) {
             uint256 excess = buf - target;
             uint256 assets = excess / assetScale;
-            if (assets > 0) {
-                asset.safeTransfer(address(pt), assets);
-                pt.deposit(assets);
+            if (assets > 0 && _buyPtBestEffort(assets)) {
                 emit BufferRebalanced(-int256(assets * assetScale));
             }
         } else if (buf < _bandWad(bufferMinBps)) {

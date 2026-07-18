@@ -17,6 +17,11 @@ interface IPTAdapter {
     ///         Caller must have transferred the assets to the adapter first.
     function deposit(uint256 assets) external;
 
+    /// @notice Return up to `amount` of un-deposited deposit asset held by the
+    ///         adapter to `to` (the manager). Used to recover funds when a PT
+    ///         buy is skipped/failed so nothing strands (audit M2).
+    function reclaim(uint256 amount, address to) external;
+
     /// @notice Sell/redeem PT worth `amountWad` and send proceeds to `to`.
     /// @return assetsOut deposit-asset units actually delivered
     function withdraw(uint256 amountWad, address to) external returns (uint256 assetsOut);

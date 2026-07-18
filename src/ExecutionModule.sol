@@ -110,11 +110,22 @@ contract ExecutionModule is IExecutionModule, Ownable {
             uint256 shortfall = (amountWad - safeVal) * 10_250 / 10_000;
             uint256 riskyVal = riskyLeg.value();
             if (shortfall > riskyVal) shortfall = riskyVal;
-            if (shortfall > 0) _sellRisky(shortfall, 150);
+            // Best-effort (audit L4): if the risky sale can't clear its bound,
+            // still deliver the safe-leg portion below rather than reverting
+            // the whole redemption funding. Self-call so try/catch applies.
+            if (shortfall > 0) {
+                try this.sellRiskySelf(shortfall) {} catch {}
+            }
         }
         uint256 available = FixedPointMathLib.min(amountWad, safeLeg.value());
         safeLeg.provide(available, vault);
         emit AssetsFreed(available);
+    }
+
+    /// @dev Self-call entrypoint so `freeAssets` can try/catch the risky sale.
+    function sellRiskySelf(uint256 deltaWad) external {
+        if (msg.sender != address(this)) revert NotVault();
+        _sellRisky(deltaWad, 150);
     }
 
     // ---------- composition maintenance (keeper) ----------
