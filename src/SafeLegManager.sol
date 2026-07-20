@@ -140,14 +140,21 @@ contract SafeLegManager is ILeg, Ownable {
     ///      redemption funding are never bricked by PT market conditions.
     function provide(uint256 amountWad, address to) external onlyRouter returns (uint256 deliveredAssets) {
         uint256 buf = bufferWad();
-        uint256 minBuf = _bandWad(bufferMinBps);
+        // The buffer-only payout must stay oracle-independent (audit M1 residual):
+        // _bandWad -> vault.totalNav() -> safeLeg.value() -> pt.value(), so a
+        // Pendle-oracle outage would otherwise brick even a buffer-coverable
+        // payout despite the documented "fast path". Fall back to a zero reserve
+        // band when totalNav is unavailable; rebalanceBuffer restores it later.
+        uint256 minBuf = _bandWadOrZero(bufferMinBps);
         uint256 fromBuffer = buf > minBuf ? buf - minBuf : 0;
         if (fromBuffer > amountWad) fromBuffer = amountWad;
 
         uint256 fromPt = amountWad - fromBuffer;
         if (fromPt > 0) {
-            // only now touch the PT/oracle path
-            uint256 ptValue = pt.value();
+            // PT is needed. If its oracle is down we cannot value it; treat it
+            // as 0 so the deliverable buffer is still paid best-effort rather
+            // than reverting the whole payout.
+            uint256 ptValue = _ptValueOrZero();
             if (fromPt > ptValue) {
                 // PT cannot cover the remainder: dig into the protected band
                 uint256 extra = fromPt - ptValue;
@@ -197,5 +204,28 @@ contract SafeLegManager is ILeg, Ownable {
 
     function _bandWad(uint256 bps) internal view returns (uint256) {
         return INavSource(vault).totalNav() * bps / 10_000;
+    }
+
+    /// @dev Band size, but resilient to a reverting totalNav (e.g. a PT-oracle
+    ///      outage propagating through safeLeg.value()). Used only on the
+    ///      outbound payout path, where a zero reserve band frees the full
+    ///      buffer rather than bricking a buffer-coverable payout (audit M1).
+    function _bandWadOrZero(uint256 bps) internal view returns (uint256) {
+        try INavSource(vault).totalNav() returns (uint256 nav) {
+            return nav * bps / 10_000;
+        } catch {
+            return 0;
+        }
+    }
+
+    /// @dev pt.value() but 0 if the PT oracle read reverts, so a buffer-plus-PT
+    ///      payout still delivers its buffer portion during an oracle outage
+    ///      instead of reverting (audit M1).
+    function _ptValueOrZero() internal view returns (uint256) {
+        try pt.value() returns (uint256 v) {
+            return v;
+        } catch {
+            return 0;
+        }
     }
 }

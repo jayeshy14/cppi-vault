@@ -82,6 +82,22 @@ contract MockNavVault {
     }
 }
 
+/// @dev Production-shaped NAV source: totalNav chains through the leg's own
+///      value() (buffer + pt.value()), so a PT-oracle outage propagates into
+///      band sizing exactly as CPPIVault.totalNav() does. Used to expose the
+///      M1 residual that the fixed-value MockNavVault masks.
+contract MockNavVaultLive {
+    SafeLegManager public leg;
+
+    function setLeg(SafeLegManager l) external {
+        leg = l;
+    }
+
+    function totalNav() external view returns (uint256) {
+        return leg.value();
+    }
+}
+
 contract SafeLegManagerTest is Test {
     SafeLegManager manager;
     MockPTAdapter pt;
@@ -195,6 +211,33 @@ contract SafeLegManagerTest is Test {
         // a request that fits the deliverable buffer must not touch the oracle
         vm.prank(executor);
         uint256 out = manager.provide(15e18, executor);
+        assertEq(out, 15e6);
+    }
+
+    // G1 (M1 residual): the test above passes only because MockNavVault severs
+    // the totalNav -> safeLeg.value -> pt.value chain that exists in production.
+    // With a production-shaped NAV source, a PT-oracle outage makes totalNav()
+    // (and thus the band read in provide) revert. A buffer-coverable payout must
+    // still succeed.
+    function test_g1_bufferPayoutSurvivesTotalNavOracleOutage() public {
+        MockNavVaultLive liveVault = new MockNavVaultLive();
+        SafeLegManager legL = new SafeLegManager(address(liveVault), address(usdc), 6, owner);
+        liveVault.setLeg(legL);
+        MockPTAdapter ptL = new MockPTAdapter(address(usdc));
+        vm.prank(owner);
+        legL.setPeriphery(IPTAdapter(address(ptL)), executor, keeper);
+
+        // 1000 in -> ~3% buffer (30) / PT (970); buffer covers the 15 payout
+        usdc.mint(address(legL), 1000e6);
+        vm.prank(keeper);
+        legL.onInflow();
+        assertGt(legL.bufferWad(), 15e18);
+
+        // PT oracle down: leg.value() and thus liveVault.totalNav() now revert
+        ptL.setFailValue(true);
+
+        vm.prank(executor);
+        uint256 out = legL.provide(15e18, executor); // must NOT brick on the band read
         assertEq(out, 15e6);
     }
 
