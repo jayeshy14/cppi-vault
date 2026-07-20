@@ -11,6 +11,7 @@ import {ILeg, IExecutionModule, IRateOracle} from "./interfaces/IVaultPeriphery.
 
 interface IOracleHealth {
     function healthy() external view returns (bool);
+    function prolongedStale() external view returns (bool);
 }
 
 /// @title CPPIVault
@@ -255,6 +256,7 @@ contract CPPIVault is ERC20, Ownable {
     ///         shares, and reserve their payout. Requires enough idle asset
     ///         to cover reserved payouts (keeper frees assets beforehand).
     function settleEpoch() external onlyKeeper {
+        _requireOracleHealthy(); // L5: don't crystallize value at a stale/depegged price
         _accrueManagementFee();
         uint256 depositsWad = totalPendingDepositsWad;
         uint256 redeemShares = totalPendingRedeemShares;
@@ -448,6 +450,20 @@ contract CPPIVault is ERC20, Ownable {
         executor.executeRebalance(deltaWad, bound);
         controller.recordRebalance(trigger, a.floor, a.targetRisky);
         emit Rebalanced(trigger, deltaWad, a.floor, a.targetRisky);
+    }
+
+    /// @notice Permissionless circuit breaker (audit M4). When the oracle has
+    ///         been stale beyond its prolonged window, the risky-leg mark is
+    ///         frozen and the normal CPPI trigger is blind to a real decline,
+    ///         so anyone may fully de-risk the vault into the safe leg at the
+    ///         degraded bound. Over-conservative but floor-safe: a later
+    ///         rebalance re-risks once the feed recovers.
+    function deRiskUnderProlongedStaleness() external {
+        if (address(healthSource) == address(0) || !healthSource.prolongedStale()) revert OracleUnhealthy();
+        uint256 risky = riskyLeg.value();
+        if (risky == 0) revert NoTrigger();
+        executor.executeRebalance(-int256(risky), EMERGENCY_DEGRADED_SLIPPAGE_BPS);
+        emit Rebalanced(RebalancePolicy.Trigger.Emergency, -int256(risky), 0, 0);
     }
 
     /// @notice Keeper pre-funds redemption settlement from the safe side.
