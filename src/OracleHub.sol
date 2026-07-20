@@ -55,11 +55,26 @@ contract OracleHub is IPriceSource, IRateOracle, Ownable {
     uint256 public maxFeedAge = 3900; // Chainlink ETH/USD heartbeat 3600 + margin
     uint256 public maxBasisBps = 200;
 
+    /// @dev Optional USDC/USD feed (audit L8). The vault denominates in USDC
+    ///      but marks the risky leg in USD; if unset, USDC is assumed at par.
+    ///      When set and USDC depegs beyond maxUsdcDepegBps, healthy() flips
+    ///      false so deposits/settlement pause until the peg returns.
+    IChainlinkFeed public usdcUsdFeed;
+    uint256 public maxUsdcDepegBps = 200;
+
+    /// @dev Prolonged-staleness window (audit M4). Once the ETH feed has been
+    ///      stale longer than this since the last good snapshot, the CPPI
+    ///      trigger is blind, so a permissionless circuit-breaker de-risk is
+    ///      allowed (see CPPIVault.deRiskUnderProlongedStaleness).
+    uint256 public prolongedStalenessWindow = 3 hours;
+
     uint256 public snapshotEthUsdWad;
     uint64 public snapshotAt;
 
     event Refreshed(uint256 ethUsdWad);
     event ParamsSet(uint256 maxFeedAge, uint256 maxBasisBps);
+    event UsdcFeedSet(address feed, uint256 maxDepegBps);
+    event ProlongedWindowSet(uint256 window);
 
     error NoPrice();
     error BadParams();
@@ -81,6 +96,21 @@ contract OracleHub is IPriceSource, IRateOracle, Ownable {
         maxFeedAge = maxFeedAge_;
         maxBasisBps = maxBasisBps_;
         emit ParamsSet(maxFeedAge_, maxBasisBps_);
+    }
+
+    /// @notice Set the optional USDC/USD depeg feed (audit L8). address(0)
+    ///         disables the check (USDC assumed at par).
+    function setUsdcFeed(address feed, uint256 maxDepegBps) external onlyOwner {
+        if (maxDepegBps > 2000) revert BadParams();
+        usdcUsdFeed = IChainlinkFeed(feed);
+        maxUsdcDepegBps = maxDepegBps;
+        emit UsdcFeedSet(feed, maxDepegBps);
+    }
+
+    function setProlongedStalenessWindow(uint256 window) external onlyOwner {
+        if (window < maxFeedAge || window > 2 days) revert BadParams();
+        prolongedStalenessWindow = window;
+        emit ProlongedWindowSet(window);
     }
 
     // ---------- maintenance ----------
@@ -125,10 +155,34 @@ contract OracleHub is IPriceSource, IRateOracle, Ownable {
         return _basisBps(rateBased, poolBased) <= maxBasisBps;
     }
 
-    /// @notice Feed freshness gate the vault uses to pause NEW deposits.
+    /// @notice Health gate the vault uses to pause NEW user flows and epoch
+    ///         settlement: the ETH feed must be fresh AND USDC on peg (L8).
     function healthy() external view returns (bool) {
         (, bool fresh) = _freshEthUsd();
-        return fresh;
+        return fresh && usdcHealthy();
+    }
+
+    /// @notice True when USDC is within its depeg tolerance (or no feed set).
+    function usdcHealthy() public view returns (bool) {
+        if (address(usdcUsdFeed) == address(0)) return true;
+        try usdcUsdFeed.latestRoundData() returns (uint80, int256 answer, uint256, uint256 updatedAt, uint80) {
+            if (answer <= 0 || block.timestamp > updatedAt + maxFeedAge) return false;
+            uint256 px = uint256(answer) * 10 ** (18 - usdcUsdFeed.decimals());
+            uint256 dev = px > 1e18 ? px - 1e18 : 1e18 - px;
+            return dev * 10_000 / 1e18 <= maxUsdcDepegBps;
+        } catch {
+            return false;
+        }
+    }
+
+    /// @notice True when the ETH feed has been stale beyond the prolonged
+    ///         window (audit M4): the risky-leg mark is frozen and the CPPI
+    ///         trigger is blind, so a permissionless circuit-breaker de-risk
+    ///         is warranted.
+    function prolongedStale() external view returns (bool) {
+        (, bool fresh) = _freshEthUsd();
+        if (fresh) return false;
+        return snapshotAt != 0 && block.timestamp > uint256(snapshotAt) + prolongedStalenessWindow;
     }
 
     // ---------- IRateOracle ----------

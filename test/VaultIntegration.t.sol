@@ -18,9 +18,14 @@ import {MockPTAdapter} from "./SafeLegManager.t.sol";
 
 contract MockHealth is IOracleHealth {
     bool public healthy = true;
+    bool public prolongedStale;
 
     function set(bool h) external {
         healthy = h;
+    }
+
+    function setProlonged(bool p) external {
+        prolongedStale = p;
     }
 }
 
@@ -155,6 +160,40 @@ contract VaultIntegrationTest is Test {
         vm.warp(block.timestamp + 366 days);
         vm.prank(keeper);
         assertEq(vault.settleTerm(), 0);
+    }
+
+    // ---------- M4/L5 regression: oracle robustness ----------
+
+    function test_m4_prolongedStaleness_permissionlessFullDeRisk() public {
+        _enter(100_000e6);
+        assertGt(riskyLeg.value(), 20_000e18); // ~27% ETH
+
+        // oracle stale beyond the prolonged window: normal trigger is blind
+        health.setProlonged(true);
+
+        // anyone can force a full de-risk into the safe leg
+        vm.prank(makeAddr("rando"));
+        vault.deRiskUnderProlongedStaleness();
+        assertLt(riskyLeg.value(), 1e15); // fully de-risked
+        assertGe(vault.shareholderNav() + 1e15, controller.lastFloor());
+    }
+
+    function test_m4_notAllowedWhenNotProlonged() public {
+        _enter(100_000e6);
+        vm.prank(makeAddr("rando"));
+        vm.expectRevert(CPPIVault.OracleUnhealthy.selector);
+        vault.deRiskUnderProlongedStaleness();
+    }
+
+    function test_l5_settleEpoch_blockedWhenUnhealthy() public {
+        // alice requests while healthy
+        vm.prank(alice);
+        vault.requestDeposit(100_000e6);
+        // oracle goes unhealthy before settlement
+        health.set(false);
+        vm.prank(keeper);
+        vm.expectRevert(CPPIVault.OracleUnhealthy.selector);
+        vault.settleEpoch();
     }
 
     function _enter(uint256 assets) internal {

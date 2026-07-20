@@ -76,6 +76,49 @@ contract OracleHubTest is Test {
         assertTrue(hub.wstethBuyAllowed());
     }
 
+    // ---------- L8 regression: USDC depeg gate ----------
+
+    function test_l8_noUsdcFeed_assumesPar() public view {
+        assertTrue(hub.usdcHealthy());
+        assertTrue(hub.healthy());
+    }
+
+    function test_l8_usdcDepeg_flipsUnhealthy() public {
+        MockFeed usdc = new MockFeed();
+        usdc.set(1e8, block.timestamp); // $1.00
+        hub.setUsdcFeed(address(usdc), 200); // 2% tolerance
+        assertTrue(hub.healthy());
+
+        usdc.set(0.99e8, block.timestamp); // 1% off: within tolerance
+        assertTrue(hub.usdcHealthy());
+
+        usdc.set(0.95e8, block.timestamp); // 5% depeg: breaches
+        assertFalse(hub.usdcHealthy());
+        assertFalse(hub.healthy()); // eth fresh but usdc depegged
+    }
+
+    function test_l8_staleUsdcFeed_unhealthy() public {
+        MockFeed usdc = new MockFeed();
+        usdc.set(1e8, block.timestamp);
+        hub.setUsdcFeed(address(usdc), 200);
+        vm.warp(block.timestamp + 2 hours); // usdc feed now stale
+        assertFalse(hub.usdcHealthy());
+    }
+
+    // ---------- M4 regression: prolonged-staleness view ----------
+
+    function test_m4_prolongedStale_onlyAfterWindow() public {
+        hub.refresh(); // snapshotAt = now
+        assertFalse(hub.prolongedStale()); // fresh
+
+        vm.warp(block.timestamp + 2 hours); // stale (> 65min) but < 3h window
+        assertFalse(hub.healthy());
+        assertFalse(hub.prolongedStale());
+
+        vm.warp(block.timestamp + 2 hours); // now > 3h since snapshot
+        assertTrue(hub.prolongedStale());
+    }
+
     function test_staleness_servesSnapshot_flagsUnhealthy() public {
         hub.refresh(); // snapshot 2000
         // feed goes stale beyond maxFeedAge
