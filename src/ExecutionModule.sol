@@ -49,6 +49,10 @@ contract ExecutionModule is IExecutionModule, Ownable {
     uint24 public fallbackFee = 3000;
     uint24 public wstethPoolFee = 100;
 
+    /// @dev Ceiling on the caller-supplied composition-rebalance slippage
+    ///      (audit L3): a keeper cannot drive minOut toward zero.
+    uint256 internal constant MAX_COMPOSITION_SLIPPAGE_BPS = 500;
+
     event RebalanceExecuted(int256 deltaWad, uint256 usdcMoved, uint256 wethMoved);
     event CompositionRebalanced(int256 wethToWstethWad);
     event AssetsFreed(uint256 amountWad);
@@ -132,8 +136,17 @@ contract ExecutionModule is IExecutionModule, Ownable {
 
     /// @notice Move the risky leg's wstETH share toward its target, bounded
     ///         by `maxMoveWad` per call. WETH<->wstETH through the tight pool.
+    /// @dev Keeper-only maintenance. The caller-supplied slippage is clamped
+    ///      (audit L3) so it can never drive minOut to zero, and the whole
+    ///      function is gated on wstethBuyAllowed() so neither branch trims at
+    ///      a mispriced/stale mark (the buy branch already required this; the
+    ///      sell branch did not). Composition maintenance simply pauses during
+    ///      a depeg or feed outage; the keeper retries when healthy.
     function rebalanceComposition(uint256 maxMoveWad, uint256 maxSlippageBps) external {
         if (msg.sender != keeper && msg.sender != owner()) revert NotKeeper();
+        if (maxSlippageBps > MAX_COMPOSITION_SLIPPAGE_BPS) maxSlippageBps = MAX_COMPOSITION_SLIPPAGE_BPS;
+        if (!priceSource.wstethBuyAllowed()) return; // L3: no mispriced trims when stale/depegged
+
         uint256 total = riskyLeg.value();
         if (total == 0) return;
         uint256 targetWad = total * riskyLeg.wstethTargetBps() / 10_000;
@@ -142,7 +155,6 @@ contract ExecutionModule is IExecutionModule, Ownable {
         uint256 wstUsd = priceSource.wstethUsdWad();
 
         if (currentWad < targetWad) {
-            if (!priceSource.wstethBuyAllowed()) return; // depeg/staleness: no new wstETH
             uint256 moveWad = FixedPointMathLib.min(targetWad - currentWad, maxMoveWad);
             (uint256 wethGot,) = riskyLeg.provide(moveWad, address(this));
             if (wethGot == 0) return;
@@ -202,6 +214,13 @@ contract ExecutionModule is IExecutionModule, Ownable {
 
     /// @dev Try the primary fee tier; on any revert (thin pool, minOut miss),
     ///      retry once on the fallback tier with the same bound.
+    /// @dev sqrtPriceLimitX96 = 0 is deliberate (audit L7). For an exact-input
+    ///      single-hop swap the oracle-anchored `amountOutMinimum` already
+    ///      bounds the output (hence the extractable sandwich value) to the
+    ///      slippage bound: the swap either delivers >= minOut or reverts. A
+    ///      price limit would only add exact-input partial-fill semantics
+    ///      (leftover tokenIn to account for) without tightening that bound,
+    ///      so it is intentionally omitted rather than risk a mis-set limit.
     function _swap(address tokenIn, address tokenOut, uint24 fee, uint256 amountIn, uint256 minOut, address recipient)
         internal
         returns (uint256 amountOut)
