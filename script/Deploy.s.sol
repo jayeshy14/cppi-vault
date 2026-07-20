@@ -67,7 +67,7 @@ contract Deploy is Script {
         controller = new CPPIController(address(vault), MULTIPLIER, fc, rc);
         safeLeg = new SafeLegManager(address(vault), USDC, 6, msg.sender);
         riskyLeg = new RiskyLegManager(WETH, WSTETH, msg.sender);
-        exec = new ExecutionModule(address(vault), USDC, WETH, WSTETH, msg.sender);
+        exec = new ExecutionModule(address(vault), USDC, WETH, WSTETH, 6, msg.sender);
         oracle = new OracleHub(CHAINLINK_ETH_USD, WSTETH, WSTETH_WETH_POOL_100, true, msg.sender);
         pt = new PendlePTAdapter(PENDLE_ROUTER, PENDLE_PY_ORACLE, pendleMarket, USDC, USDC, 6, 900, msg.sender);
     }
