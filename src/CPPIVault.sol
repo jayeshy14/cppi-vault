@@ -84,6 +84,10 @@ contract CPPIVault is ERC20, Ownable {
     uint256 public totalPendingDepositsWad;
     uint256 public totalPendingRedeemShares;
     uint256 public totalReservedPayoutsWad;
+    // per-epoch redemption bookkeeping so the last claimant of an epoch drains
+    // the aggregate-vs-per-user rounding residue (audit I1)
+    mapping(uint64 => uint256) public epochReservedWad;
+    mapping(uint64 => uint256) public epochRedeemRemaining;
 
     // ---------- events / errors ----------
 
@@ -207,7 +211,11 @@ contract CPPIVault is ERC20, Ownable {
     /// @notice ERC-7540 request form. requestId is the epoch the request
     ///         settles in; requests are fungible within an epoch.
     function requestDeposit(uint256 assets, address controller, address owner_) external returns (uint256) {
+        // caller must be able to move owner_'s assets AND to write the
+        // controller's request slot (audit L1): the latter blocks seeding a
+        // dust request into an arbitrary controller's slot to grief it
         _authControllerOrOperator(owner_);
+        _authControllerOrOperator(controller);
         return _requestDeposit(assets, controller, owner_);
     }
 
@@ -217,6 +225,7 @@ contract CPPIVault is ERC20, Ownable {
 
     function requestRedeem(uint256 shares, address controller, address owner_) external returns (uint256) {
         _authControllerOrOperator(owner_);
+        _authControllerOrOperator(controller); // audit L1: can't grief a foreign slot
         return _requestRedeem(shares, controller, owner_);
     }
 
@@ -275,6 +284,8 @@ contract CPPIVault is ERC20, Ownable {
             if (_idleWad() < totalReservedPayoutsWad + payoutWad) revert InsufficientIdle();
             _burn(address(this), redeemShares);
             totalReservedPayoutsWad += payoutWad;
+            epochReservedWad[epoch] = payoutWad;
+            epochRedeemRemaining[epoch] = redeemShares;
             totalPendingRedeemShares = 0;
         }
 
@@ -342,10 +353,19 @@ contract CPPIVault is ERC20, Ownable {
         uint256 price = epochNavPerShare[r.epoch];
         if (r.amountWad == 0) revert NothingToClaim();
         if (price == 0) revert EpochNotSettled();
-        uint256 payoutWad = uint256(r.amountWad).mulWad(price);
+        uint256 shares = uint256(r.amountWad);
+        uint256 payoutWad = shares.mulWad(price);
         uint64 epoch = r.epoch;
         delete redeemRequests[controller];
         totalReservedPayoutsWad -= payoutWad;
+        epochReservedWad[epoch] -= payoutWad;
+        epochRedeemRemaining[epoch] -= shares;
+        // last redeemer of the epoch: drain the aggregate-vs-per-user rounding
+        // residue so it doesn't stay frozen in shareholderNav (audit I1)
+        if (epochRedeemRemaining[epoch] == 0 && epochReservedWad[epoch] != 0) {
+            totalReservedPayoutsWad -= epochReservedWad[epoch];
+            epochReservedWad[epoch] = 0;
+        }
         assets = payoutWad / assetScale;
         asset.safeTransfer(receiver, assets);
         emit AssetsClaimed(controller, epoch, payoutWad);

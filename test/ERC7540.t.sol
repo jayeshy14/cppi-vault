@@ -90,6 +90,95 @@ contract ERC7540Test is Test {
         vault.requestDeposit(100e6, alice, alice);
     }
 
+    // L1: an attacker cannot seed a request into a foreign controller's slot
+    function test_l1_cannotGriefForeignControllerSlot() public {
+        address attacker = makeAddr("attacker");
+        usdc.mint(attacker, 1e6);
+        vm.prank(attacker);
+        usdc.approve(address(vault), type(uint256).max);
+        // attacker funds from self (owner_=attacker) but targets alice's slot
+        vm.prank(attacker);
+        vm.expectRevert(CPPIVault.NotOperator.selector);
+        vault.requestDeposit(1, alice, attacker);
+        // alice's slot is untouched: she can request normally
+        vm.prank(alice);
+        vault.requestDeposit(100e6, alice, alice);
+        assertEq(vault.pendingDepositRequest(1, alice), 100e6);
+    }
+
+    function test_l1_operatorCanStillWriteControllerSlot() public {
+        vm.prank(alice);
+        vault.setOperator(bob, true);
+        // bob (alice's operator) targets alice's slot funding from alice: ok
+        vm.prank(bob);
+        vault.requestDeposit(100e6, alice, alice);
+        assertEq(vault.pendingDepositRequest(1, alice), 100e6);
+    }
+
+    // I1: the aggregate payout reserved at settlement is floor(sumShares * price),
+    // but each claimant is paid floor(userShares * price). With more than one
+    // fractional (non-1e18-multiple) claimant the per-user floors sum to strictly
+    // less than the aggregate, leaving a few wei of reserved dust. The last
+    // claimant of the epoch must drain that residue so it does not stay frozen
+    // in totalReservedPayoutsWad.
+    function test_i1_reservedDustDrainedOnLastClaim() public {
+        address carol = makeAddr("carol");
+        address[3] memory holders = [alice, bob, carol];
+        for (uint256 i = 0; i < holders.length; i++) {
+            usdc.mint(holders[i], 1_000e6);
+            vm.prank(holders[i]);
+            usdc.approve(address(vault), type(uint256).max);
+        }
+
+        // seed holder enters at price 1e18 so the later donation has an existing
+        // shareholder to accrue to, moving navPerShare off 1e18.
+        address seed = makeAddr("seed");
+        usdc.mint(seed, 1_000e6);
+        vm.prank(seed);
+        usdc.approve(address(vault), type(uint256).max);
+        vm.prank(seed);
+        vault.requestDeposit(300e6);
+        vm.prank(keeper);
+        vault.settleEpoch();
+        vm.prank(seed);
+        vault.claimShares();
+
+        // donate yield -> navPerShare = 400/300 = 1.3333...e18 (non-terminating
+        // wad fraction, so shares * price leaves nonzero sub-wei remainders)
+        usdc.mint(address(vault), 100e6);
+
+        // three holders each mint the same fractional share amount at 1.5e18
+        for (uint256 i = 0; i < holders.length; i++) {
+            vm.prank(holders[i]);
+            vault.requestDeposit(100e6);
+        }
+        vm.prank(keeper);
+        vault.settleEpoch();
+        for (uint256 i = 0; i < holders.length; i++) {
+            vm.prank(holders[i]);
+            vault.claimShares();
+        }
+        assertTrue(vault.balanceOf(alice) % 1e18 != 0, "holders should be fractional");
+
+        // all three redeem their full balance in the same epoch
+        for (uint256 i = 0; i < holders.length; i++) {
+            uint256 shares = vault.balanceOf(holders[i]);
+            vm.prank(holders[i]);
+            vault.requestRedeem(shares);
+        }
+        vm.prank(keeper);
+        vault.settleEpoch();
+
+        // claims one by one; the aggregate-vs-per-user rounding residue (here
+        // 2 wei) sits reserved until the last claimant of the epoch drains it.
+        for (uint256 i = 0; i < holders.length; i++) {
+            vm.prank(holders[i]);
+            vault.claimAssets();
+        }
+
+        assertEq(vault.totalReservedPayoutsWad(), 0, "reserved dust must be fully drained");
+    }
+
     function test_deposit_fullClaimOnly() public {
         vm.prank(alice);
         vault.requestDeposit(100e6, alice, alice);
