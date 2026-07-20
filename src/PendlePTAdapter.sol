@@ -66,6 +66,7 @@ contract PendlePTAdapter is IPTAdapter, Ownable {
     event Withdrawn(uint256 amountWad, uint256 ptIn, uint256 assetsOut, bool viaRedemption);
     event Rolled(address indexed fromMarket, address indexed toMarket, uint256 assetsMoved, uint256 ptOut);
     event SlippageSet(uint256 bps);
+    event MarketPrepared(address indexed market, uint16 cardinality);
 
     error NotAuthorized();
     error AlreadySet();
@@ -184,6 +185,21 @@ contract PendlePTAdapter is IPTAdapter, Ownable {
         emit Rolled(oldMarket, newMarket, assetsMoved, ptOut);
     }
 
+    /// @notice Warm up a market's Pendle oracle ahead of binding it (audit I2).
+    ///         `_bindMarket` (via the constructor or `rollToMarket`) reverts
+    ///         `OracleNotReady` when the TWAP window is not yet satisfied, which
+    ///         rolls back the cardinality increase issued in the same tx, so the
+    ///         bump never persists and the operator is stuck. This standalone,
+    ///         non-reverting call issues the increase (a permissionless one-time
+    ///         market setup) so the TWAP window can start filling before the
+    ///         roll. Owner-only convenience; the underlying market call is itself
+    ///         permissionless, so it can also be triggered directly on the market.
+    function prepareMarket(address market_) external onlyOwner {
+        (bool increaseRequired, uint16 cardinalityRequired,) = oracle.getOracleState(market_, twapDuration);
+        if (increaseRequired) IPendleMarket(market_).increaseObservationsCardinalityNext(cardinalityRequired);
+        emit MarketPrepared(market_, cardinalityRequired);
+    }
+
     // ---------- internal ----------
 
     function _bindMarket(address market_) internal {
@@ -193,7 +209,10 @@ contract PendlePTAdapter is IPTAdapter, Ownable {
         }
         (bool increaseRequired, uint16 cardinalityRequired, bool oldestSatisfied) =
             oracle.getOracleState(market_, twapDuration);
-        // cardinality growth is permissionless one-time setup; do it ourselves
+        // cardinality growth is a permissionless one-time market setup; issue it
+        // here too, but note it only persists when this bind succeeds. For a cold
+        // oracle (oldest observation not yet satisfied) the revert below rolls it
+        // back, so warm the market with prepareMarket() ahead of the roll (audit I2).
         if (increaseRequired) IPendleMarket(market_).increaseObservationsCardinalityNext(cardinalityRequired);
         if (!oldestSatisfied) revert OracleNotReady();
         uint256 expiry = IPendleMarket(market_).expiry();

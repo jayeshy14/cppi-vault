@@ -68,7 +68,7 @@ contract ExecutionModuleForkTest is Test {
         pt = new MockPTAdapter(USDC);
         safeLeg = new SafeLegManager(address(vaultStub), USDC, 6, address(this));
         riskyLeg = new RiskyLegManager(WETH, WSTETH, address(this));
-        exec = new ExecutionModule(address(vaultStub), USDC, WETH, WSTETH, address(this));
+        exec = new ExecutionModule(address(vaultStub), USDC, WETH, WSTETH, 6, address(this));
 
         safeLeg.setPeriphery(IPTAdapter(address(pt)), address(exec), keeper);
         riskyLeg.setPeriphery(IPriceSource(address(prices)), address(exec), keeper);

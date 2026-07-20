@@ -38,7 +38,7 @@ contract ExecutionLayerTest is Test {
         safeLeg = new SafeLegManager(address(vault), address(usdc), 6, owner);
         pt = new MockPTAdapter(address(usdc));
         riskyLeg = new RiskyLegManager(address(weth), address(wsteth), owner);
-        exec = new ExecutionModule(address(vault), address(usdc), address(weth), address(wsteth), owner);
+        exec = new ExecutionModule(address(vault), address(usdc), address(weth), address(wsteth), 6, owner);
 
         vm.startPrank(owner);
         safeLeg.setPeriphery(IPTAdapter(address(pt)), address(exec), keeper);
@@ -241,5 +241,30 @@ contract ExecutionLayerTest is Test {
         exec.executeRebalance(int256(1e18), 50);
         vm.expectRevert(ExecutionModule.NotKeeper.selector);
         exec.rebalanceComposition(1e18, 50);
+    }
+
+    // I3: the module derives its scale and dust floor from the asset decimals
+    // passed at construction instead of baking in a 6-decimal (1e12) constant,
+    // so a non-6-decimal redeployment converts correctly.
+    function test_i3_scaleAndDustFloorTrackAssetDecimals() public {
+        ExecutionModule e6 =
+            new ExecutionModule(address(vault), address(usdc), address(weth), address(wsteth), 6, owner);
+        assertEq(e6.assetScale(), 1e12);
+        assertEq(e6.dustFloor(), 1e6);
+
+        ExecutionModule e8 =
+            new ExecutionModule(address(vault), address(usdc), address(weth), address(wsteth), 8, owner);
+        assertEq(e8.assetScale(), 1e10);
+        assertEq(e8.dustFloor(), 1e8);
+
+        ExecutionModule e18 =
+            new ExecutionModule(address(vault), address(usdc), address(weth), address(wsteth), 18, owner);
+        assertEq(e18.assetScale(), 1);
+        assertEq(e18.dustFloor(), 1e18);
+    }
+
+    function test_i3_decimalsAbove18Revert() public {
+        vm.expectRevert();
+        new ExecutionModule(address(vault), address(usdc), address(weth), address(wsteth), 19, owner);
     }
 }

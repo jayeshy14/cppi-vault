@@ -68,7 +68,7 @@ contract CrashScenariosTest is Test {
         safeLeg = new SafeLegManager(address(vault), address(usdc), 6, owner);
         pt = new MockPTAdapter(address(usdc));
         riskyLeg = new RiskyLegManager(address(weth), address(wsteth), owner);
-        exec = new ExecutionModule(address(vault), address(usdc), address(weth), address(wsteth), owner);
+        exec = new ExecutionModule(address(vault), address(usdc), address(weth), address(wsteth), 6, owner);
 
         vm.startPrank(owner);
         vault.setController(controller);
@@ -298,5 +298,70 @@ contract CrashScenariosTest is Test {
         vm.prank(makeAddr("rando"));
         vm.expectRevert(); // both tiers miss the 150bps minOut
         vault.rebalance();
+    }
+
+    // ---------- L6: guardian-widenable healthy-oracle emergency bound ----
+
+    // The exact thin-liquidity dislocation of test_h6_tightBoundStillProtects...
+    // (3% cost, healthy oracle) reverts the permissionless de-risk at 150bps.
+    // The guardian can widen the healthy-oracle bound so the defense clears.
+    function test_l6_guardianWidenedBoundClearsThinLiquidityDeRisk() public {
+        router.setTier(500, 300, false);
+        router.setTier(3000, 300, false);
+        vm.warp(block.timestamp + 2 hours);
+        prices.setEth(ETH0 * 60 / 100);
+
+        // guardian (== keeper in this setup) widens the emergency bound to 5%
+        // for the declared dislocation; the 3% fill now clears (audit L6).
+        vm.prank(keeper);
+        vault.setEmergencySlippageBps(500);
+
+        uint256 riskyBefore = riskyLeg.value();
+        vm.prank(makeAddr("rando"));
+        vault.rebalance(); // must NOT revert now: 500bps bound accommodates 3%
+
+        assertLt(riskyLeg.value(), riskyBefore); // de-risk actually executed
+        assertLt(riskyLeg.value() * 1e18 / vault.shareholderNav(), 0.35e18);
+    }
+
+    // Resetting the override (0) restores the tight default, so the same de-risk
+    // reverts again: the knob never permanently loosens MEV protection.
+    function test_l6_resetRestoresTightBound() public {
+        router.setTier(500, 300, false);
+        router.setTier(3000, 300, false);
+        vm.warp(block.timestamp + 2 hours);
+        prices.setEth(ETH0 * 60 / 100);
+
+        vm.prank(keeper);
+        vault.setEmergencySlippageBps(500);
+        vm.prank(keeper);
+        vault.setEmergencySlippageBps(0); // reset to EMERGENCY_SLIPPAGE_BPS
+
+        vm.prank(makeAddr("rando"));
+        vm.expectRevert(); // back to the tight 150bps bound
+        vault.rebalance();
+    }
+
+    function test_l6_setEmergencySlippage_accessAndBounds() public {
+        // only guardian or owner may set
+        vm.prank(makeAddr("rando"));
+        vm.expectRevert(CPPIVault.NotGuardian.selector);
+        vault.setEmergencySlippageBps(500);
+
+        // out-of-range rejected: below the tight floor, above the degraded cap
+        vm.prank(keeper);
+        vm.expectRevert(CPPIVault.SlippageOutOfRange.selector);
+        vault.setEmergencySlippageBps(149);
+        vm.prank(keeper);
+        vm.expectRevert(CPPIVault.SlippageOutOfRange.selector);
+        vault.setEmergencySlippageBps(1001);
+
+        // in-range and reset accepted
+        vm.prank(keeper);
+        vault.setEmergencySlippageBps(1000);
+        assertEq(vault.emergencySlippageBps(), 1000);
+        vm.prank(keeper);
+        vault.setEmergencySlippageBps(0);
+        assertEq(vault.emergencySlippageBps(), 0);
     }
 }

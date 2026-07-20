@@ -21,9 +21,14 @@ interface IVaultAccounting {
 ///         oracle-anchored slippage bounds. Atomic by construction: no async
 ///         dependency anywhere on the emergency path. The vault widens the
 ///         emergency bound while the oracle is degraded (audit H6) so a
-///         lagging feed cannot brick the de-risk; a swap can still revert if
-///         no venue can fill within the (widened) bound, which is the market
-///         genuinely gapping past a fair exit, i.e. the >1/m gap case.
+///         lagging feed cannot brick the de-risk, and the guardian can widen
+///         the healthy-oracle emergency bound during a thin- or attacker-
+///         thinned-liquidity dislocation (audit L6). A swap can still revert
+///         when no venue fills within the (widened) bound: either the market
+///         is genuinely gapping past a fair exit (the >1/m gap case) or a
+///         transient pool dislocation that the permissionless, re-callable
+///         rebalance retries away as arbitrage re-aligns the pool. The de-risk
+///         is therefore best-effort-within-bound, not unconditionally atomic.
 /// @dev Buy-side funding order: the vault's FREE idle first (settled deposit
 ///      cash awaiting allocation; pending-deposit and reserved-payout cash is
 ///      never touched), then the safe leg. Sell proceeds always land in the
@@ -37,7 +42,12 @@ contract ExecutionModule is IExecutionModule, Ownable {
     address public immutable usdc;
     address public immutable weth;
     address public immutable wsteth;
-    uint256 internal constant USDC_SCALE = 1e12;
+    /// @dev Derived from the vault asset's decimals (audit I3). The vault, safe
+    ///      leg and PT adapter all parameterize assetDecimals, so this module
+    ///      must too rather than bake in a 6-decimal (1e12) assumption that
+    ///      silently breaks every conversion on a non-6-decimal redeployment.
+    uint256 public immutable assetScale; // 10^(18 - assetDecimals)
+    uint256 public immutable dustFloor; // one whole asset unit: 10^assetDecimals
 
     SafeLegManager public safeLeg;
     RiskyLegManager public riskyLeg;
@@ -66,11 +76,13 @@ contract ExecutionModule is IExecutionModule, Ownable {
         _;
     }
 
-    constructor(address vault_, address usdc_, address weth_, address wsteth_, address owner_) {
+    constructor(address vault_, address usdc_, address weth_, address wsteth_, uint8 assetDecimals_, address owner_) {
         vault = vault_;
         usdc = usdc_;
         weth = weth_;
         wsteth = wsteth_;
+        assetScale = 10 ** (18 - assetDecimals_); // reverts if assetDecimals_ > 18
+        dustFloor = 10 ** assetDecimals_;
         _initializeOwner(owner_);
     }
 
@@ -180,7 +192,7 @@ contract ExecutionModule is IExecutionModule, Ownable {
         // funding: vault free idle first, then the safe leg
         uint256 freeIdleWad = _vaultFreeIdleWad();
         uint256 fromIdleWad = FixedPointMathLib.min(deltaWad, freeIdleWad);
-        uint256 fromIdleUsdc = fromIdleWad / USDC_SCALE;
+        uint256 fromIdleUsdc = fromIdleWad / assetScale;
         if (fromIdleUsdc > 0) usdc.safeTransferFrom(vault, address(this), fromIdleUsdc);
 
         if (fromIdleWad < deltaWad) {
@@ -189,7 +201,7 @@ contract ExecutionModule is IExecutionModule, Ownable {
         uint256 usdcIn = SafeTransferLib.balanceOf(usdc, address(this));
         if (usdcIn == 0) return;
 
-        uint256 minWethOut = (usdcIn * USDC_SCALE).divWad(priceSource.ethUsdWad()) * (10_000 - maxSlippageBps) / 10_000;
+        uint256 minWethOut = (usdcIn * assetScale).divWad(priceSource.ethUsdWad()) * (10_000 - maxSlippageBps) / 10_000;
         uint256 wethOut = _swap(usdc, weth, primaryFee, usdcIn, minWethOut, address(riskyLeg));
         emit RebalanceExecuted(int256(deltaWad), usdcIn, wethOut);
     }
@@ -206,7 +218,7 @@ contract ExecutionModule is IExecutionModule, Ownable {
         }
         if (wethGot == 0) return;
 
-        uint256 minUsdcOut = wethGot.mulWad(ethUsd) * (10_000 - maxSlippageBps) / 10_000 / USDC_SCALE;
+        uint256 minUsdcOut = wethGot.mulWad(ethUsd) * (10_000 - maxSlippageBps) / 10_000 / assetScale;
         uint256 usdcOut = _swap(weth, usdc, primaryFee, wethGot, minUsdcOut, address(safeLeg));
         safeLeg.onInflow();
         emit RebalanceExecuted(-int256(deltaWad), usdcOut, wethGot);
@@ -247,8 +259,8 @@ contract ExecutionModule is IExecutionModule, Ownable {
     ///      the vault. Never runs inside freeAssets (that flow is outbound).
     function _sweepIdle() internal {
         uint256 freeWad = _vaultFreeIdleWad();
-        uint256 assets = freeWad / USDC_SCALE;
-        if (assets < 1e6) return; // dust: not worth the PT trade
+        uint256 assets = freeWad / assetScale;
+        if (assets < dustFloor) return; // dust: not worth the PT trade
         usdc.safeTransferFrom(vault, address(safeLeg), assets);
         safeLeg.onInflow();
     }
@@ -259,7 +271,7 @@ contract ExecutionModule is IExecutionModule, Ownable {
     ///      the funding back into the safe leg).
     function _vaultFreeIdleWad() internal view returns (uint256) {
         IVaultAccounting v = IVaultAccounting(vault);
-        uint256 idleWad = SafeTransferLib.balanceOf(usdc, vault) * USDC_SCALE;
+        uint256 idleWad = SafeTransferLib.balanceOf(usdc, vault) * assetScale;
         uint256 owedWad = v.totalPendingDepositsWad() + v.totalReservedPayoutsWad()
             + v.totalPendingRedeemShares().mulWad(v.navPerShare());
         return idleWad > owedWad ? idleWad - owedWad : 0;

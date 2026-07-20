@@ -67,6 +67,16 @@ contract CPPIVault is ERC20, Ownable {
     ///      wider bound during a genuine feed outage beats not de-risking.
     uint256 internal constant EMERGENCY_DEGRADED_SLIPPAGE_BPS = 1000;
 
+    /// @dev Guardian-settable widening of the *healthy-oracle* emergency bound
+    ///      (audit L6). 0 (default) uses EMERGENCY_SLIPPAGE_BPS. During a genuine
+    ///      thin- or attacker-thinned-liquidity dislocation the permissionless
+    ///      de-risk can miss the tight 150bps bound and revert; the guardian may
+    ///      widen it, up to the already-sanctioned degraded ceiling, so the
+    ///      defense still clears. Widening trades more single-swap sandwich
+    ///      exposure (audit L7) for guaranteed execution, so it is a deliberate,
+    ///      resettable knob that never loosens the scheduled or degraded bounds.
+    uint256 public emergencySlippageBps;
+
     // ---------- async accounting ----------
 
     struct Request {
@@ -102,6 +112,7 @@ contract CPPIVault is ERC20, Ownable {
     event ManagementFeeAccrued(uint256 feeShares);
     event PerformanceFeeCharged(uint256 feeShares, uint256 gainWad);
     event OperatorSet(address indexed controller, address indexed operator, bool approved);
+    event EmergencySlippageSet(uint256 bps);
 
     error ZeroAmount();
     error Paused();
@@ -118,6 +129,7 @@ contract CPPIVault is ERC20, Ownable {
     error FeeAboveCap();
     error NotOperator();
     error ClaimMismatch();
+    error SlippageOutOfRange();
 
     modifier onlyKeeper() {
         if (msg.sender != keeper && msg.sender != owner()) revert NotKeeper();
@@ -176,6 +188,21 @@ contract CPPIVault is ERC20, Ownable {
         if (msg.sender != guardian && msg.sender != owner()) revert NotGuardian();
         paused = paused_;
         emit PausedSet(paused_);
+    }
+
+    /// @notice Widen (or reset) the healthy-oracle emergency de-risk bound so a
+    ///         thin/attacker-thinned pool cannot indefinitely revert the
+    ///         permissionless defense (audit L6). 0 resets to the tight default;
+    ///         any override stays within [EMERGENCY_SLIPPAGE_BPS,
+    ///         EMERGENCY_DEGRADED_SLIPPAGE_BPS] so it can only ever widen the
+    ///         tight bound toward the already-sanctioned degraded ceiling.
+    function setEmergencySlippageBps(uint256 bps) external {
+        if (msg.sender != guardian && msg.sender != owner()) revert NotGuardian();
+        if (bps != 0 && (bps < EMERGENCY_SLIPPAGE_BPS || bps > EMERGENCY_DEGRADED_SLIPPAGE_BPS)) {
+            revert SlippageOutOfRange();
+        }
+        emergencySlippageBps = bps;
+        emit EmergencySlippageSet(bps);
     }
 
     // ---------- NAV ----------
@@ -462,8 +489,15 @@ contract CPPIVault is ERC20, Ownable {
         uint256 bound;
         if (trigger == RebalancePolicy.Trigger.Emergency) {
             // relax the bound while the oracle is degraded so a lagging feed
-            // cannot brick the permissionless de-risk (audit H6)
-            bound = _oracleDegraded() ? EMERGENCY_DEGRADED_SLIPPAGE_BPS : EMERGENCY_SLIPPAGE_BPS;
+            // cannot brick the permissionless de-risk (audit H6); when the feed
+            // is healthy use the guardian-configurable bound, which widens the
+            // tight default only during a declared thin-liquidity dislocation
+            // (audit L6) and defaults to EMERGENCY_SLIPPAGE_BPS
+            if (_oracleDegraded()) {
+                bound = EMERGENCY_DEGRADED_SLIPPAGE_BPS;
+            } else {
+                bound = emergencySlippageBps == 0 ? EMERGENCY_SLIPPAGE_BPS : emergencySlippageBps;
+            }
         } else {
             bound = SCHEDULED_SLIPPAGE_BPS;
         }

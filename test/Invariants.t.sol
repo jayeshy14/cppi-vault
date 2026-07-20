@@ -186,7 +186,7 @@ contract InvariantsTest is Test {
         safeLeg = new SafeLegManager(address(vault), address(usdc), 6, owner);
         pt = new MockPTAdapter(address(usdc));
         riskyLeg = new RiskyLegManager(address(weth), address(wsteth), owner);
-        exec = new ExecutionModule(address(vault), address(usdc), address(weth), address(wsteth), owner);
+        exec = new ExecutionModule(address(vault), address(usdc), address(weth), address(wsteth), 6, owner);
 
         vm.startPrank(owner);
         vault.setController(controller);
