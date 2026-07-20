@@ -185,8 +185,12 @@ contract CPPIController {
     function _clampRate(uint256 raw) internal returns (uint256 rate) {
         rate = raw > MAX_RATE_WAD ? MAX_RATE_WAD : raw;
         uint256 last = lastRateWad;
+        // Asymmetric clamp (audit M3): only bound UPWARD moves. A spiked rate
+        // deepens the discount and lowers the floor, the manipulation
+        // direction, so it is rate-limited. A falling rate raises the floor
+        // (conservative, better-funded), so it is applied immediately rather
+        // than lagging behind a fast PT-yield collapse.
         if (rate > last + MAX_RATE_STEP_WAD) rate = last + MAX_RATE_STEP_WAD;
-        else if (rate + MAX_RATE_STEP_WAD < last) rate = last - MAX_RATE_STEP_WAD;
         lastRateWad = rate;
     }
 }

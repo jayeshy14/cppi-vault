@@ -113,6 +113,24 @@ contract FloorPolicyTest is Test {
         assertLt(f1, nav);
     }
 
+    // L2: a risen rate dips raw PV below the monotone floor; the step trigger
+    // must evaluate against the EFFECTIVE floor, so no spurious step fires.
+    function test_l2_stepTriggerUsesEffectiveFloor() public {
+        FloorPolicyHarness h = new FloorPolicyHarness(cfg(FloorPolicy.Kind.Step), NAV0);
+        uint256 f0 = h.update(NAV0, RATE, T0); // floor ~86.5, lastFloor 86.5
+        assertEq(h.stepCount(), 0);
+
+        // rate spikes to 50%: raw PV ~ 90*e^-0.5 ~ 54.6, but effective floor is
+        // still 86.5 (monotone). Put NAV between rawPV*1.8 (~98) and
+        // effFloor*1.8 (~155.7): a raw-PV trigger would step, effective won't.
+        uint256 nav = 120e18;
+        h.update(nav, 0.5e18, T0 + 1);
+        assertEq(h.stepCount(), 0); // no spurious step against the too-low raw PV
+        // sanity: a genuine trigger above the effective floor DOES step
+        h.update(f0 * 181 / 100, RATE, T0 + 2);
+        assertEq(h.stepCount(), 1);
+    }
+
     // ---------- tipp ----------
 
     function test_tipp_tracksHighWater() public {
