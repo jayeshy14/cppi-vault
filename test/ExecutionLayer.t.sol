@@ -171,6 +171,34 @@ contract ExecutionLayerTest is Test {
         assertEq(usdc.balanceOf(address(vault)), 40e6);
     }
 
+    // ---------- L3 regression: composition slippage cap + freshness gate ----
+
+    function test_l3_slippageClampedToCeiling() public {
+        vm.prank(owner);
+        riskyLeg.setWstethTarget(2500);
+        weth.mint(address(riskyLeg), 10e18);
+        // 6% execution cost on BOTH tiers: exceeds the 5% composition clamp,
+        // so even asking for 100% slippage cannot drive minOut low enough
+        router.setTier(100, 600, false);
+        router.setTier(3000, 600, false);
+        vm.prank(keeper);
+        vm.expectRevert(); // clamped to 500bps; 6% cost misses minOut on both tiers
+        exec.rebalanceComposition(5_000e18, 10_000);
+    }
+
+    function test_l3_sellBranchGatedOnDepeg() public {
+        vm.prank(owner);
+        riskyLeg.setWstethTarget(1000); // 10%
+        weth.mint(address(riskyLeg), 5e18); // 10,000
+        wsteth.mint(address(riskyLeg), 5e18); // 12,000 -> ~54% wstETH, above target
+        uint256 shareBefore = riskyLeg.wstethShareBps();
+
+        prices.setBuyAllowed(false); // depeg/staleness
+        vm.prank(keeper);
+        exec.rebalanceComposition(100_000e18, 50); // sell branch must now no-op
+        assertEq(riskyLeg.wstethShareBps(), shareBefore); // unchanged
+    }
+
     function test_composition_movesTowardTarget() public {
         vm.prank(owner);
         riskyLeg.setWstethTarget(2500); // 25%
