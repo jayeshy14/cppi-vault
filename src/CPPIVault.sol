@@ -130,6 +130,7 @@ contract CPPIVault is ERC20, Ownable {
     error NotOperator();
     error ClaimMismatch();
     error SlippageOutOfRange();
+    error NavCollapsed();
 
     modifier onlyKeeper() {
         if (msg.sender != keeper && msg.sender != owner()) revert NotKeeper();
@@ -299,6 +300,15 @@ contract CPPIVault is ERC20, Ownable {
         if (depositsWad == 0 && redeemShares == 0) revert NothingToSettle();
 
         uint256 price = navPerShare();
+        // A collapsed NAV (shareholderNav == 0 while shares are outstanding)
+        // makes navPerShare 0, which is the "unsettled" sentinel for
+        // epochNavPerShare (and a divide-by-zero for the deposit-share mint).
+        // Settling here would poison the epoch: every claim/view then reads it
+        // as unsettled and reverts EpochNotSettled forever, permanently locking
+        // the requests. Refuse to settle a 0-price epoch; it becomes settleable
+        // again if NAV recovers above 0, and holders keep their shares/requests
+        // meanwhile (fairer than crystallizing a 0 payout).
+        if (price == 0) revert NavCollapsed();
         uint64 epoch = currentEpoch;
         epochNavPerShare[epoch] = price;
 

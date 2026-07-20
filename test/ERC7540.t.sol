@@ -179,6 +179,36 @@ contract ERC7540Test is Test {
         assertEq(vault.totalReservedPayoutsWad(), 0, "reserved dust must be fully drained");
     }
 
+    // G2: settling an epoch when NAV has collapsed to 0 (navPerShare == 0 while
+    // shares are outstanding) must revert instead of writing the 0 that doubles
+    // as the "unsettled" sentinel for epochNavPerShare, which would brick every
+    // claim/view for that epoch forever and permanently lock the requests.
+    function test_g2_settleRevertsWhenNavCollapsedToZero() public {
+        vm.prank(alice);
+        vault.requestDeposit(100e6);
+        vm.prank(keeper);
+        vault.settleEpoch();
+        vm.prank(alice);
+        vault.claimShares();
+        assertEq(vault.balanceOf(alice), 100e18);
+
+        // queue a full redeem: shares lock in custody, totalSupply stays 100e18
+        vm.prank(alice);
+        vault.requestRedeem(100e18);
+
+        // simulate total loss: drain the vault's idle USDC so totalNav -> 0 and
+        // navPerShare -> 0 with shares still outstanding
+        uint256 bal = usdc.balanceOf(address(vault));
+        vm.prank(address(vault));
+        usdc.transfer(address(0xdead), bal);
+        assertEq(vault.totalNav(), 0);
+        assertEq(vault.navPerShare(), 0);
+
+        vm.prank(keeper);
+        vm.expectRevert(CPPIVault.NavCollapsed.selector);
+        vault.settleEpoch();
+    }
+
     function test_deposit_fullClaimOnly() public {
         vm.prank(alice);
         vault.requestDeposit(100e6, alice, alice);
