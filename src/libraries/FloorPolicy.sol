@@ -88,9 +88,14 @@ library FloorPolicy {
             if (ratchetFloor > floor) floor = ratchetFloor;
         } else if (c.kind == Kind.Step) {
             uint256 steps;
-            while (steps < MAX_STEPS_PER_UPDATE && floor != 0 && navPerShare >= floor.mulWad(c.triggerWad)) {
+            // Trigger on the EFFECTIVE (monotone-clamped) floor, not the raw PV
+            // (audit L2): a risen rate can dip raw PV below lastFloor and fire a
+            // spurious step against the too-low raw value.
+            uint256 eff = floor > s.lastFloorPerShareWad ? floor : s.lastFloorPerShareWad;
+            while (steps < MAX_STEPS_PER_UPDATE && eff != 0 && navPerShare >= eff.mulWad(c.triggerWad)) {
                 s.protectedPerShareWad = s.protectedPerShareWad.mulWad(c.stepWad);
                 floor = CPPIMath.floorValue(s.protectedPerShareWad, rateWad, timeLeft);
+                eff = floor > s.lastFloorPerShareWad ? floor : s.lastFloorPerShareWad;
                 unchecked {
                     ++steps;
                 }
@@ -121,9 +126,11 @@ library FloorPolicy {
         } else if (c.kind == Kind.Step) {
             uint256 protectedPerShare = s.protectedPerShareWad;
             uint256 steps;
-            while (steps < MAX_STEPS_PER_UPDATE && floor != 0 && navPerShare >= floor.mulWad(c.triggerWad)) {
+            uint256 eff = floor > s.lastFloorPerShareWad ? floor : s.lastFloorPerShareWad;
+            while (steps < MAX_STEPS_PER_UPDATE && eff != 0 && navPerShare >= eff.mulWad(c.triggerWad)) {
                 protectedPerShare = protectedPerShare.mulWad(c.stepWad);
                 floor = CPPIMath.floorValue(protectedPerShare, rateWad, timeLeft);
+                eff = floor > s.lastFloorPerShareWad ? floor : s.lastFloorPerShareWad;
                 unchecked {
                     ++steps;
                 }

@@ -99,6 +99,20 @@ contract CPPIControllerTest is Test {
         vm.stopPrank();
     }
 
+    // M3: a falling rate raises the floor immediately (no downward clamp lag)
+    function test_m3_fallingRateRaisesFloorImmediately() public {
+        vm.startPrank(vault);
+        // start term is at 4%; assess once to seed lastRate
+        CPPIController.Assessment memory a1 = controller.assess(NAV0, 1e18, 27e18, RATE);
+        // PT yield collapses to 1% in one step: floor should jump up now, not
+        // catch down 2% per assess (that lag under-funds the floor, audit M3)
+        CPPIController.Assessment memory a2 = controller.assess(NAV0, 1e18, 27e18, 0.01e18);
+        assertGt(a2.floor, a1.floor);
+        // floor at 1% discount is materially higher than a 2%-clamped step
+        // would give (0.04 -> 0.02): PV(90, .01) ~ 89.1 vs PV(90, .02) ~ 88.2
+        assertGt(a2.floor, 89e18);
+    }
+
     function test_settleTerm_flow() public {
         vm.startPrank(vault);
         vm.expectRevert(CPPIController.TermNotMatured.selector);
