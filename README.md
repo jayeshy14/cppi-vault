@@ -2,7 +2,7 @@
 
 An onchain capital-protected vault built on CPPI (constant proportion portfolio insurance): a 40-year-old TradFi technique for defending a floor without buying options. The vault holds a risky leg (ETH) and a safe leg (a Pendle PT, which behaves as a zero-coupon bond), and rebalances between them so that NAV at term maturity stays above a protected level.
 
-**Status: work in progress, unaudited, not deployed. Do not use with real funds.**
+**Status: full system implemented and tested, self-audited and remediated, not independently audited, not deployed. Do not use with real funds.** See [Security](#security) for the honest state, including known open items.
 
 ## The mechanism in four equations
 
@@ -35,22 +35,43 @@ All policies share the same worst case and breach probability, because those bel
 
 ## Architecture
 
-Built and tested:
+The full system is implemented and tested.
+
+**The math core.**
 
 - `src/libraries/CPPIMath.sol`: the four equations. Floor PV via expWad discounting, cushion, clamped target, drift and cushion health in bps, and the 1/m gap bound.
 - `src/libraries/FloorPolicy.sol`: the floor-policy family as one function, `max(PV(protected, liveRate, timeLeft), policy term)`, monotone-clamped within a term so no rate move or policy path can lower an established floor.
 - `src/libraries/RebalancePolicy.sol`: two-tier trigger classification. A keeper-gated scheduled path (cadence AND drift above a small band) and a **permissionless emergency path** (drift above a large band OR cushion below a health floor), so anyone can save the vault if the keeper is down during a crash. A global minimum interval anti-thrashes both paths.
 - `src/CPPIController.sol`: the per-class state machine. Term lifecycle with onchain shortfall reporting at settlement, rebalance assessment, and a clamped live-rate input (hard cap plus bounded per-update change) so the floor cannot be manipulated through the PT-yield oracle.
 
-In progress (spec'd, not yet implemented): the ERC-7540 vault with term-based share accounting, the safe-leg manager (PT adapter with maturity rolls plus a liquid buffer absorbing routine flows), the risky-leg manager (WETH plus a capped wstETH fraction), and the execution module (direct Uniswap V3 with oracle-anchored minOut and a fallback venue; the emergency path is atomic by design).
+**The vault and its periphery.**
 
-## Testing philosophy
+- `src/CPPIVault.sol`: the ERC-7540 async vault and ERC-20 share token. The load-bearing accounting identity is `shareholderNav = totalNav - totalPendingDepositsWad - totalReservedPayoutsWad`, and shares price at `navPerShare = shareholderNav / totalSupply`. Epoch-based request and claim lifecycle, term lifecycle, a high-water-mark performance fee plus a time-based management fee, the permissionless emergency de-risk, and a permissionless prolonged-staleness circuit breaker. Roles: owner (setup), keeper (settle, rebalance, term, redemption pre-fund), guardian (pause, emergency-bound widening), and per-user ERC-7540 operators.
+- `src/SafeLegManager.sol`: the safe leg. A liquid USDC buffer held in bands plus a Pendle PT position; `value() = buffer + pt.value()`. Outbound payouts (`provide`) are best-effort and oracle-outage resilient; routine inflows allocate the excess above the buffer target into PT.
+- `src/RiskyLegManager.sol`: the risky leg. WETH plus a capped wstETH fraction, marked through the oracle hub.
+- `src/PendlePTAdapter.sol`: the bond leg. Wraps a Pendle PT market with TWAP-oracle valuation, deposit and withdraw with slippage bounds, and single-transaction maturity rolls to the next market; `prepareMarket` warms a cold oracle ahead of a roll.
+- `src/ExecutionModule.sol`: execution. Direct Uniswap V3 with oracle-anchored `minOut` and a fallback fee tier, buy and sell of the risky leg, redemption funding, and composition rebalancing. The emergency de-risk is best-effort within its slippage bound rather than unconditionally atomic: a swap can still revert when no venue fills within the bound, which is the market gapping past a fair exit or a transient pool dislocation that the re-callable rebalance retries away.
+- `src/OracleHub.sol`: the price and rate source. Chainlink ETH/USD with staleness handling, wstETH marked at the Lido exchange rate rather than a manipulable pool spot, a USDC-depeg and wstETH-basis gate, and the health and prolonged-staleness signals the emergency paths read.
 
-The Solidity is pinned to the research harness: reference values such as the $86.47 floor and the 27.06% initial exposure are asserted against the Python backtest to a relative precision of 1e-12, so the contracts and the research can never silently disagree. Beyond unit tests, fuzz suites enforce the invariants that matter: the floor is monotone within a term across arbitrary NAV/rate/time paths, the target never exceeds NAV, the emergency trigger dominates whenever its conditions hold, and ratchet loops terminate. 37 tests currently pass.
+## Testing
+
+The Solidity is pinned to the research harness: reference values such as the $86.47 floor and the 27.06% initial exposure are asserted against the Python backtest to a relative precision of 1e-12, so the contracts and the research can never silently disagree. Beyond unit tests, the suite covers the full ERC-7540 lifecycle, the execution and oracle layers, historical crash-scenario replays, and fuzz and invariant suites that enforce the properties that matter: the floor is monotone within a term across arbitrary NAV/rate/time paths, the target never exceeds NAV, the emergency trigger dominates whenever its conditions hold, and ratchet loops terminate. **151 tests currently pass.**
 
 ```bash
 forge test
 ```
+
+## Security
+
+This codebase has been through a structured self-audit (21 findings: 6 high, 4 medium, 8 low, 3 informational), with each finding remediated in its own reviewed pull request (#10 through #23). A subsequent multi-agent adversarial re-verification then re-checked every fix against the current code and hunted the changed surface for new bugs. It confirmed the high-severity fixes and caught two robustness bugs the first pass had missed (a buffer payout that was not actually oracle-independent, and a settlement path that could permanently lock requests on a NAV collapse), both since fixed.
+
+It also found that several remediations are only partial, and those are **open**:
+
+- The emergency-exit `minOut` is still anchored to the oracle price, so a prolonged oracle outage combined with a real price move can leave the de-risk unfillable (M4, and the related H6/L8 anchoring).
+- The performance-fee basis overcharges depositors who enter mid-term during an up-term (H1). Keep `performanceFeeBps = 0` until this is fixed.
+- Fee mints are not oracle-health gated (L5).
+
+None break normal operation, but they are hardening items that must be closed, and an independent external audit is required, before this could go near real funds. It is **not deployed**.
 
 ## References
 
