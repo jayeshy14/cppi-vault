@@ -19,26 +19,48 @@ import {CPPIMath} from "./CPPIMath.sol";
 library FloorPolicy {
     using FixedPointMathLib for uint256;
 
+    // ============================================================================
+    // Types and config
+    // ============================================================================
+
+    /// @notice The floor-policy family: a fixed floor, a Step ratchet, or a TIPP
+    ///         continuous ratchet.
     enum Kind {
+        /// @notice Fixed: the floor is the discounted present value of the protected amount only.
         Fixed,
+        /// @notice Step: the protected amount ratchets up in discrete steps as navPerShare rises.
         Step,
+        /// @notice TIPP: the floor ratchets continuously against a high-water navPerShare.
         Tipp
     }
 
+    /// @notice Immutable policy parameters for a term.
+    /// @param kind Which floor policy applies.
+    /// @param termStart Term start timestamp.
+    /// @param termEnd Term end (maturity) timestamp.
+    /// @param protectionWad P: fraction of term-start navPerShare promised at maturity, WAD.
+    /// @param triggerWad T (Step only): a step fires when navPerShare >= T x floorPerShare, WAD.
+    /// @param stepWad k (Step only): the protectedPerShare multiplier applied per step, WAD.
+    /// @param ratchetWad TIPP only: floorPerShare >= ratchet x high-water navPerShare, WAD.
     struct Config {
         Kind kind;
         uint64 termStart;
         uint64 termEnd;
-        uint256 protectionWad; // P: fraction of term-start navPerShare promised at maturity
-        uint256 triggerWad; // T (Step only): step fires when navPerShare >= T x floorPerShare
-        uint256 stepWad; // k (Step only): protectedPerShare multiplier per step
-        uint256 ratchetWad; // TIPP only: floorPerShare >= ratchet x high-water navPerShare
+        uint256 protectionWad;
+        uint256 triggerWad;
+        uint256 stepWad;
+        uint256 ratchetWad;
     }
 
+    /// @notice Mutable per-term floor state.
+    /// @param protectedPerShareWad Per-share protected amount; the Step policy raises this, WAD.
+    /// @param hwmNavPerShareWad TIPP high-water navPerShare, WAD.
+    /// @param lastFloorPerShareWad Monotonicity clamp: the highest per-share floor seen this term, WAD.
+    /// @param stepCount Number of Step ratchets applied so far this term.
     struct State {
-        uint256 protectedPerShareWad; // per-share protected amount; Step raises this
-        uint256 hwmNavPerShareWad; // TIPP high-water navPerShare
-        uint256 lastFloorPerShareWad; // monotonicity clamp (per share)
+        uint256 protectedPerShareWad;
+        uint256 hwmNavPerShareWad;
+        uint256 lastFloorPerShareWad;
         uint32 stepCount;
     }
 
@@ -46,11 +68,26 @@ library FloorPolicy {
     ///      enough to exhaust this cap cannot occur without navPerShare growing
     ///      >= MIN_STEP^MAX_STEPS x floor in a single update.
     uint256 internal constant MAX_STEPS_PER_UPDATE = 10;
+
+    /// @dev Minimum Step multiplier k, WAD. Bounds how fast the protected amount
+    ///      can ratchet and underpins the MAX_STEPS_PER_UPDATE loop bound.
     uint256 internal constant MIN_STEP = 1.05e18;
+
+    /// @dev Fixed-point scale: 1e18 represents 1.0.
     uint256 internal constant WAD = 1e18;
 
+    /// @notice A config field was outside its permitted range or ordering.
     error InvalidConfig();
 
+    // ============================================================================
+    // Policy
+    // ============================================================================
+
+    /// @notice Revert unless the config is internally consistent: protection must
+    ///         be in (0, 1); the term must end after it starts; for Step, k must
+    ///         be in [MIN_STEP, T) and T must not exceed 2e18; for TIPP, the
+    ///         ratchet must be in (0, 1).
+    /// @param c The floor policy config to check.
     function validate(Config memory c) internal pure {
         if (c.protectionWad == 0 || c.protectionWad >= WAD) revert InvalidConfig();
         if (c.termEnd <= c.termStart) revert InvalidConfig();
@@ -64,6 +101,10 @@ library FloorPolicy {
         }
     }
 
+    /// @notice Seed a term's floor state from the entry navPerShare and config.
+    /// @param s the floor state to initialize
+    /// @param c the floor-policy config for this share class
+    /// @param termStartNavPerShare navPerShare at term start, WAD
     function initialize(State storage s, Config memory c, uint256 termStartNavPerShare) internal {
         s.protectedPerShareWad = termStartNavPerShare.mulWad(c.protectionWad);
         s.hwmNavPerShareWad = termStartNavPerShare;
