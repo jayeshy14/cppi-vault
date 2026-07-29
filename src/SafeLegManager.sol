@@ -8,6 +8,8 @@ import {IPTAdapter} from "./interfaces/IPTAdapter.sol";
 
 /// @notice Minimal view the manager needs from the vault for buffer sizing.
 interface INavSource {
+    /// @notice Total value in the vault system, used to size the buffer bands.
+    /// @return The vault's total NAV, in WAD.
     function totalNav() external view returns (uint256);
 }
 
@@ -22,25 +24,71 @@ interface INavSource {
 contract SafeLegManager is ILeg, Ownable {
     using SafeTransferLib for address;
 
+    // ============================================================================
+    // Configuration and state
+    // ============================================================================
+
+    /// @notice The vault this leg serves; the NAV source used for buffer sizing.
     address public immutable vault;
+
+    /// @notice The deposit asset (e.g. USDC) held in the liquid buffer.
     address public immutable asset;
+
+    /// @dev Scale factor to convert the asset's native decimals to WAD (18 decimals).
     uint256 internal immutable assetScale;
 
+    /// @notice The PT adapter holding the fixed-yield floor funding behind the buffer.
     IPTAdapter public pt;
-    address public executor; // may pull for risky-leg buys
+
+    /// @notice The execution module authorized to pull buffer funds for risky-leg buys.
+    address public executor;
+
+    /// @notice The keeper authorized to run recipient-less buffer maintenance.
     address public keeper;
 
+    /// @notice Target buffer size as a fraction of vault totalNav, in basis points.
     uint16 public bufferTargetBps = 300;
+
+    /// @notice Lower band for the buffer as a fraction of vault totalNav, in basis points.
     uint16 public bufferMinBps = 100;
+
+    /// @notice Upper band for the buffer as a fraction of vault totalNav, in basis points.
     uint16 public bufferMaxBps = 500;
 
+    // ============================================================================
+    // Events, errors, and modifiers
+    // ============================================================================
+
+    /// @notice Emitted when transferred-in assets are allocated across buffer and PT.
+    /// @param assetsWad The buffer balance observed at allocation time, in WAD.
+    /// @param toBufferWad The amount retained in the buffer, in WAD.
+    /// @param toPtWad The amount routed into PT, in WAD.
     event Inflow(uint256 assetsWad, uint256 toBufferWad, uint256 toPtWad);
+
+    /// @notice Emitted when value is delivered out of the safe leg to a recipient.
+    /// @param to The recipient of the delivered assets.
+    /// @param amountWad The requested delivery amount, in WAD.
+    /// @param fromBufferWad The portion sourced from the buffer, in WAD.
+    /// @param fromPtWad The portion sourced from PT, in WAD.
     event Provided(address indexed to, uint256 amountWad, uint256 fromBufferWad, uint256 fromPtWad);
+
+    /// @notice Emitted when keeper maintenance moves value between buffer and PT.
+    /// @param deltaWad Signed change in the buffer applied by the rebalance, in WAD.
     event BufferRebalanced(int256 deltaWad);
+
+    /// @notice Emitted when the buffer bands are updated.
+    /// @param minBps The new lower band, in basis points.
+    /// @param targetBps The new target, in basis points.
+    /// @param maxBps The new upper band, in basis points.
     event BandsSet(uint16 minBps, uint16 targetBps, uint16 maxBps);
 
+    /// @notice Caller is not an authorized router or ops address for this action.
     error NotAuthorized();
+
+    /// @notice Buffer bands were set out of order or above the hard cap.
     error BadBands();
+
+    /// @notice The leg cannot cover the requested value.
     error InsufficientValue();
 
     /// @dev Value routing to a caller-chosen recipient. Excludes the keeper:
@@ -62,6 +110,15 @@ contract SafeLegManager is ILeg, Ownable {
         _;
     }
 
+    // ============================================================================
+    // Wiring (owner setup)
+    // ============================================================================
+
+    /// @notice Deploy the safe leg bound to a vault and its deposit asset.
+    /// @param vault_ The vault this leg serves and reads totalNav from.
+    /// @param asset_ The deposit asset held in the buffer.
+    /// @param assetDecimals The asset's native decimals, used to derive the WAD scale.
+    /// @param owner_ The initial owner.
     constructor(address vault_, address asset_, uint8 assetDecimals, address owner_) {
         vault = vault_;
         asset = asset_;
@@ -69,12 +126,20 @@ contract SafeLegManager is ILeg, Ownable {
         _initializeOwner(owner_);
     }
 
+    /// @notice Wire the PT adapter and the executor/keeper roles.
+    /// @param pt_ The PT adapter holding the floor funding.
+    /// @param executor_ The execution module allowed to pull for risky-leg buys.
+    /// @param keeper_ The keeper allowed to run buffer maintenance.
     function setPeriphery(IPTAdapter pt_, address executor_, address keeper_) external onlyOwner {
         pt = pt_;
         executor = executor_;
         keeper = keeper_;
     }
 
+    /// @notice Update the buffer bands, enforcing min <= target <= max <= 1000 bps.
+    /// @param minBps The new lower band, in basis points.
+    /// @param targetBps The new target, in basis points.
+    /// @param maxBps The new upper band, in basis points.
     function setBands(uint16 minBps, uint16 targetBps, uint16 maxBps) external onlyOwner {
         if (minBps > targetBps || targetBps > maxBps || maxBps > 1000) revert BadBands();
         bufferTargetBps = targetBps;
@@ -83,21 +148,31 @@ contract SafeLegManager is ILeg, Ownable {
         emit BandsSet(minBps, targetBps, maxBps);
     }
 
-    // ---------- ILeg ----------
+    // ============================================================================
+    // ILeg views
+    // ============================================================================
 
+    /// @notice Total safe-leg value: the liquid buffer plus the PT tranche.
+    /// @return The leg value, in WAD.
     function value() public view returns (uint256) {
         return bufferWad() + pt.value();
     }
 
+    /// @notice The liquid deposit-asset buffer currently held by this leg.
+    /// @return The buffer balance, in WAD.
     function bufferWad() public view returns (uint256) {
         return SafeTransferLib.balanceOf(asset, address(this)) * assetScale;
     }
 
+    /// @notice The implied fixed rate of the underlying PT, used by the strategy.
+    /// @return The implied rate, in WAD.
     function impliedRateWad() external view returns (uint256) {
         return pt.impliedRateWad();
     }
 
-    // ---------- flows ----------
+    // ============================================================================
+    // Flows
+    // ============================================================================
 
     /// @notice Allocate assets already transferred to this contract: refill
     ///         the buffer to target, buy PT with the rest.
@@ -118,6 +193,8 @@ contract SafeLegManager is ILeg, Ownable {
     ///      back to the buffer. onInflow runs inside the permissionless
     ///      emergency rebalance, so a PT-buy revert must not unwind the
     ///      de-risk. Returns whether the buy succeeded.
+    /// @param assets The deposit-asset amount to move into PT, in native units.
+    /// @return True if the PT deposit succeeded, false if it was reclaimed to the buffer.
     function _buyPtBestEffort(uint256 assets) internal returns (bool) {
         asset.safeTransfer(address(pt), assets);
         try pt.deposit(assets) {
@@ -138,6 +215,9 @@ contract SafeLegManager is ILeg, Ownable {
     ///      bound, the buffer portion is still delivered and the shortfall
     ///      simply reduces `deliveredAssets`, so the emergency de-risk and
     ///      redemption funding are never bricked by PT market conditions.
+    /// @param amountWad The value to deliver, in WAD.
+    /// @param to The recipient of the delivered deposit asset.
+    /// @return deliveredAssets The deposit asset actually delivered, in native units.
     function provide(uint256 amountWad, address to) external onlyRouter returns (uint256 deliveredAssets) {
         uint256 buf = bufferWad();
         // The buffer-only payout must stay oracle-independent (audit M1 residual):
@@ -200,8 +280,15 @@ contract SafeLegManager is ILeg, Ownable {
         }
     }
 
-    // ---------- internal ----------
+    // ============================================================================
+    // Internal helpers
+    // ============================================================================
 
+    /// @notice Band size as a fraction of vault totalNav.
+    /// @dev Reverts if totalNav reverts (e.g. a PT-oracle outage through
+    ///      safeLeg.value()); use _bandWadOrZero on the outbound payout path.
+    /// @param bps The band as a fraction of totalNav, in basis points.
+    /// @return The band size, in WAD.
     function _bandWad(uint256 bps) internal view returns (uint256) {
         return INavSource(vault).totalNav() * bps / 10_000;
     }
