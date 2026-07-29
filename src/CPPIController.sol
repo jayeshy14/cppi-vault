@@ -80,17 +80,15 @@ contract CPPIController {
     /// @param termStart The term's start timestamp.
     /// @param termEnd The term's maturity timestamp.
     /// @param nav Aggregate shareholder NAV at term start, in WAD.
-    /// @param protectedAmount Aggregate protected amount at term start (per-share * supply), in WAD.
-    event TermStarted(
-        uint64 indexed termNumber, uint64 termStart, uint64 termEnd, uint256 nav, uint256 protectedAmount
-    );
+    /// @param protectedWad Aggregate protected amount at term start (per-share * supply), in WAD.
+    event TermStarted(uint64 indexed termNumber, uint64 termStart, uint64 termEnd, uint256 nav, uint256 protectedWad);
 
     /// @notice Emitted when a matured term is settled.
     /// @param termNumber The term counter of the settled term.
     /// @param nav Aggregate shareholder NAV at settlement, in WAD.
-    /// @param protectedAmount Aggregate protected amount reconstructed at settlement, in WAD.
+    /// @param protectedWad Aggregate protected amount reconstructed at settlement, in WAD.
     /// @param shortfall Realized shortfall below the protected amount (target: zero), in WAD.
-    event TermSettled(uint64 indexed termNumber, uint256 nav, uint256 protectedAmount, uint256 shortfall);
+    event TermSettled(uint64 indexed termNumber, uint256 nav, uint256 protectedWad, uint256 shortfall);
 
     /// @notice Emitted when an executed rebalance is recorded.
     /// @param termNumber The term counter the rebalance belongs to.
@@ -182,10 +180,10 @@ contract CPPIController {
     function settleTerm(uint256 nav, uint256 supply) external onlyVault returns (uint256 shortfall) {
         if (!termActive) revert TermNotActive();
         if (block.timestamp < floorConfig.termEnd) revert TermNotMatured();
-        uint256 protectedAmount = floorState.protectedPerShareWad.mulWad(supply);
-        shortfall = nav < protectedAmount ? protectedAmount - nav : 0;
+        uint256 protectedWad = floorState.protectedPerShareWad.mulWad(supply);
+        shortfall = nav < protectedWad ? protectedWad - nav : 0;
         termActive = false;
-        emit TermSettled(termNumber, nav, protectedAmount, shortfall);
+        emit TermSettled(termNumber, nav, protectedWad, shortfall);
     }
 
     // ============================================================================

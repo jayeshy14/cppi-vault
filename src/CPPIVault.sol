@@ -218,10 +218,10 @@ contract CPPIVault is ERC20, Ownable {
     event PerformanceFeeCharged(uint256 feeShares, uint256 gainWad);
 
     /// @notice Emitted when a controller sets or revokes an operator.
-    /// @param controller The controller granting/revoking authority.
+    /// @param controller_ The controller granting/revoking authority.
     /// @param operator The operator being set.
     /// @param approved The new approval state.
-    event OperatorSet(address indexed controller, address indexed operator, bool approved);
+    event OperatorSet(address indexed controller_, address indexed operator, bool approved);
 
     /// @notice Emitted when the guardian/owner widens or resets the healthy-oracle
     ///         emergency slippage bound.
@@ -453,16 +453,16 @@ contract CPPIVault is ERC20, Ownable {
     ///      too blocks seeding a dust request into an arbitrary controller's slot
     ///      to grief it (audit L1).
     /// @param assets The deposit amount, in the asset's native decimals.
-    /// @param controller The controller whose request slot is credited.
+    /// @param controller_ The controller whose request slot is credited.
     /// @param owner_ The address whose assets are pulled in.
     /// @return The epoch the request settles in (its ERC-7540 requestId).
-    function requestDeposit(uint256 assets, address controller, address owner_) external returns (uint256) {
+    function requestDeposit(uint256 assets, address controller_, address owner_) external returns (uint256) {
         // caller must be able to move owner_'s assets AND to write the
         // controller's request slot (audit L1): the latter blocks seeding a
         // dust request into an arbitrary controller's slot to grief it
         _authControllerOrOperator(owner_);
-        _authControllerOrOperator(controller);
-        return _requestDeposit(assets, controller, owner_);
+        _authControllerOrOperator(controller_);
+        return _requestDeposit(assets, controller_, owner_);
     }
 
     /// @notice Queue a redeem request for the caller, as both controller and owner.
@@ -477,13 +477,13 @@ contract CPPIVault is ERC20, Ownable {
     ///      and controller (to write its request slot); gating the controller
     ///      blocks griefing a foreign slot (audit L1).
     /// @param shares The share amount to lock for redemption, in WAD.
-    /// @param controller The controller whose request slot is credited.
+    /// @param controller_ The controller whose request slot is credited.
     /// @param owner_ The address whose shares are locked in custody.
     /// @return The epoch the request settles in (its ERC-7540 requestId).
-    function requestRedeem(uint256 shares, address controller, address owner_) external returns (uint256) {
+    function requestRedeem(uint256 shares, address controller_, address owner_) external returns (uint256) {
         _authControllerOrOperator(owner_);
-        _authControllerOrOperator(controller); // audit L1: can't grief a foreign slot
-        return _requestRedeem(shares, controller, owner_);
+        _authControllerOrOperator(controller_); // audit L1: can't grief a foreign slot
+        return _requestRedeem(shares, controller_, owner_);
     }
 
     /// @notice Shared deposit-request logic: pull assets and accrue into the
@@ -492,21 +492,21 @@ contract CPPIVault is ERC20, Ownable {
     ///      new request if the controller still has an unsettled request from an
     ///      earlier epoch. Amounts are scaled to WAD for internal accounting.
     /// @param assets The deposit amount, in the asset's native decimals.
-    /// @param controller The controller whose request slot is credited.
+    /// @param controller_ The controller whose request slot is credited.
     /// @param owner_ The address whose assets are pulled in.
     /// @return The current epoch, in which the request settles.
-    function _requestDeposit(uint256 assets, address controller, address owner_) internal returns (uint256) {
+    function _requestDeposit(uint256 assets, address controller_, address owner_) internal returns (uint256) {
         if (paused) revert Paused();
         _requireOracleHealthy();
         if (assets == 0) revert ZeroAmount();
-        Request storage r = depositRequests[controller];
+        Request storage r = depositRequests[controller_];
         if (r.amountWad != 0 && r.epoch != currentEpoch) revert PendingRequestFromEarlierEpoch();
         asset.safeTransferFrom(owner_, address(this), assets);
         uint256 wad = assets * assetScale;
         r.epoch = currentEpoch;
         r.amountWad += uint192(wad);
         totalPendingDepositsWad += wad;
-        emit DepositRequested(controller, currentEpoch, wad);
+        emit DepositRequested(controller_, currentEpoch, wad);
         return currentEpoch;
     }
 
@@ -516,20 +516,20 @@ contract CPPIVault is ERC20, Ownable {
     ///      new request if the controller still has an unsettled request from an
     ///      earlier epoch. Shares are transferred to the vault to lock them.
     /// @param shares The share amount to lock for redemption, in WAD.
-    /// @param controller The controller whose request slot is credited.
+    /// @param controller_ The controller whose request slot is credited.
     /// @param owner_ The address whose shares are locked in custody.
     /// @return The current epoch, in which the request settles.
-    function _requestRedeem(uint256 shares, address controller, address owner_) internal returns (uint256) {
+    function _requestRedeem(uint256 shares, address controller_, address owner_) internal returns (uint256) {
         if (paused) revert Paused();
         _requireOracleHealthy();
         if (shares == 0) revert ZeroAmount();
-        Request storage r = redeemRequests[controller];
+        Request storage r = redeemRequests[controller_];
         if (r.amountWad != 0 && r.epoch != currentEpoch) revert PendingRequestFromEarlierEpoch();
         _transfer(owner_, address(this), shares); // lock shares in custody
         r.epoch = currentEpoch;
         r.amountWad += uint192(shares);
         totalPendingRedeemShares += shares;
-        emit RedeemRequested(controller, currentEpoch, shares);
+        emit RedeemRequested(controller_, currentEpoch, shares);
         return currentEpoch;
     }
 
@@ -596,12 +596,12 @@ contract CPPIVault is ERC20, Ownable {
     ///      whole claimable amount or it reverts ClaimMismatch.
     /// @param assets The full claimable deposit amount, in native decimals.
     /// @param receiver The address that receives the minted shares.
-    /// @param controller The controller whose settled deposit is claimed.
+    /// @param controller_ The controller whose settled deposit is claimed.
     /// @return shares The shares delivered to the receiver, in WAD.
-    function deposit(uint256 assets, address receiver, address controller) external returns (uint256 shares) {
-        _authControllerOrOperator(controller);
-        if (assets != claimableDepositRequest(depositRequests[controller].epoch, controller)) revert ClaimMismatch();
-        return _claimDeposit(controller, receiver);
+    function deposit(uint256 assets, address receiver, address controller_) external returns (uint256 shares) {
+        _authControllerOrOperator(controller_);
+        if (assets != claimableDepositRequest(depositRequests[controller_].epoch, controller_)) revert ClaimMismatch();
+        return _claimDeposit(controller_, receiver);
     }
 
     /// @notice ERC-7540 full-only mint claim: deliver the settled deposit shares.
@@ -609,15 +609,15 @@ contract CPPIVault is ERC20, Ownable {
     ///      price or it reverts ClaimMismatch.
     /// @param shares The full claimable share amount, in WAD.
     /// @param receiver The address that receives the shares.
-    /// @param controller The controller whose settled deposit is claimed.
+    /// @param controller_ The controller whose settled deposit is claimed.
     /// @return assets The assets that funded the claim, in native decimals.
-    function mint(uint256 shares, address receiver, address controller) external returns (uint256 assets) {
-        _authControllerOrOperator(controller);
-        Request storage r = depositRequests[controller];
+    function mint(uint256 shares, address receiver, address controller_) external returns (uint256 assets) {
+        _authControllerOrOperator(controller_);
+        Request storage r = depositRequests[controller_];
         uint256 price = epochNavPerShare[r.epoch];
         if (price == 0 || shares != uint256(r.amountWad).divWad(price)) revert ClaimMismatch();
         assets = uint256(r.amountWad) / assetScale;
-        _claimDeposit(controller, receiver);
+        _claimDeposit(controller_, receiver);
     }
 
     /// @notice ERC-7540 full-only redeem claim: pay out the settled redemption.
@@ -625,13 +625,13 @@ contract CPPIVault is ERC20, Ownable {
     ///      must be settled, or it reverts.
     /// @param shares The full locked redeem share amount, in WAD.
     /// @param receiver The address that receives the assets.
-    /// @param controller The controller whose settled redemption is claimed.
+    /// @param controller_ The controller whose settled redemption is claimed.
     /// @return assets The payout delivered, in native decimals.
-    function redeem(uint256 shares, address receiver, address controller) external returns (uint256 assets) {
-        _authControllerOrOperator(controller);
-        if (shares != uint256(redeemRequests[controller].amountWad)) revert ClaimMismatch();
-        if (epochNavPerShare[redeemRequests[controller].epoch] == 0) revert EpochNotSettled();
-        return _claimRedeem(controller, receiver);
+    function redeem(uint256 shares, address receiver, address controller_) external returns (uint256 assets) {
+        _authControllerOrOperator(controller_);
+        if (shares != uint256(redeemRequests[controller_].amountWad)) revert ClaimMismatch();
+        if (epochNavPerShare[redeemRequests[controller_].epoch] == 0) revert EpochNotSettled();
+        return _claimRedeem(controller_, receiver);
     }
 
     /// @notice ERC-7540 full-only withdraw claim: pay out the settled redemption
@@ -640,35 +640,35 @@ contract CPPIVault is ERC20, Ownable {
     ///      the settled price or it reverts.
     /// @param assets The full claimable payout, in native decimals.
     /// @param receiver The address that receives the assets.
-    /// @param controller The controller whose settled redemption is claimed.
+    /// @param controller_ The controller whose settled redemption is claimed.
     /// @return shares The locked shares burned for the payout, in WAD.
-    function withdraw(uint256 assets, address receiver, address controller) external returns (uint256 shares) {
-        _authControllerOrOperator(controller);
-        Request storage r = redeemRequests[controller];
+    function withdraw(uint256 assets, address receiver, address controller_) external returns (uint256 shares) {
+        _authControllerOrOperator(controller_);
+        Request storage r = redeemRequests[controller_];
         uint256 price = epochNavPerShare[r.epoch];
         if (price == 0) revert EpochNotSettled();
         if (assets != uint256(r.amountWad).mulWad(price) / assetScale) revert ClaimMismatch();
         shares = uint256(r.amountWad);
-        _claimRedeem(controller, receiver);
+        _claimRedeem(controller_, receiver);
     }
 
     /// @notice Shared deposit-claim logic: deliver settled shares and clear the slot.
     /// @dev Reverts NothingToClaim if the slot is empty or EpochNotSettled if its
     ///      epoch has no struck price. Deletes the request before transferring the
     ///      shares out of custody.
-    /// @param controller The controller whose settled deposit is claimed.
+    /// @param controller_ The controller whose settled deposit is claimed.
     /// @param receiver The address that receives the shares.
     /// @return shares The shares delivered, in WAD.
-    function _claimDeposit(address controller, address receiver) internal returns (uint256 shares) {
-        Request storage r = depositRequests[controller];
+    function _claimDeposit(address controller_, address receiver) internal returns (uint256 shares) {
+        Request storage r = depositRequests[controller_];
         uint256 price = epochNavPerShare[r.epoch];
         if (r.amountWad == 0) revert NothingToClaim();
         if (price == 0) revert EpochNotSettled();
         shares = uint256(r.amountWad).divWad(price);
         uint64 epoch = r.epoch;
-        delete depositRequests[controller];
+        delete depositRequests[controller_];
         _transfer(address(this), receiver, shares);
-        emit SharesClaimed(controller, epoch, shares);
+        emit SharesClaimed(controller_, epoch, shares);
     }
 
     /// @notice Shared redeem-claim logic: pay out the settled redemption and
@@ -677,18 +677,18 @@ contract CPPIVault is ERC20, Ownable {
     ///      epoch has no struck price. The last redeemer of the epoch drains the
     ///      aggregate-vs-per-user rounding residue so it does not stay frozen in
     ///      shareholderNav (audit I1).
-    /// @param controller The controller whose settled redemption is claimed.
+    /// @param controller_ The controller whose settled redemption is claimed.
     /// @param receiver The address that receives the assets.
     /// @return assets The payout delivered, in native decimals.
-    function _claimRedeem(address controller, address receiver) internal returns (uint256 assets) {
-        Request storage r = redeemRequests[controller];
+    function _claimRedeem(address controller_, address receiver) internal returns (uint256 assets) {
+        Request storage r = redeemRequests[controller_];
         uint256 price = epochNavPerShare[r.epoch];
         if (r.amountWad == 0) revert NothingToClaim();
         if (price == 0) revert EpochNotSettled();
         uint256 shares = uint256(r.amountWad);
         uint256 payoutWad = shares.mulWad(price);
         uint64 epoch = r.epoch;
-        delete redeemRequests[controller];
+        delete redeemRequests[controller_];
         totalReservedPayoutsWad -= payoutWad;
         epochReservedWad[epoch] -= payoutWad;
         epochRedeemRemaining[epoch] -= shares;
@@ -700,7 +700,7 @@ contract CPPIVault is ERC20, Ownable {
         }
         assets = payoutWad / assetScale;
         asset.safeTransfer(receiver, assets);
-        emit AssetsClaimed(controller, epoch, payoutWad);
+        emit AssetsClaimed(controller_, epoch, payoutWad);
     }
 
     // ============================================================================
@@ -709,41 +709,41 @@ contract CPPIVault is ERC20, Ownable {
 
     /// @notice ERC-7540 pending (not-yet-settled) deposit amount for a request.
     /// @param requestId The epoch the request was made in.
-    /// @param controller The controller whose request is queried.
+    /// @param controller_ The controller whose request is queried.
     /// @return assets The pending deposit amount in native decimals, or 0 if the
     ///         request is absent, from another epoch, or already settled.
-    function pendingDepositRequest(uint256 requestId, address controller) public view returns (uint256 assets) {
-        Request storage r = depositRequests[controller];
+    function pendingDepositRequest(uint256 requestId, address controller_) public view returns (uint256 assets) {
+        Request storage r = depositRequests[controller_];
         if (r.epoch == requestId && epochNavPerShare[r.epoch] == 0) return uint256(r.amountWad) / assetScale;
     }
 
     /// @notice ERC-7540 claimable (settled) deposit amount for a request.
     /// @param requestId The epoch the request was made in.
-    /// @param controller The controller whose request is queried.
+    /// @param controller_ The controller whose request is queried.
     /// @return assets The claimable deposit amount in native decimals, or 0 if
     ///         the request is absent, from another epoch, or not yet settled.
-    function claimableDepositRequest(uint256 requestId, address controller) public view returns (uint256 assets) {
-        Request storage r = depositRequests[controller];
+    function claimableDepositRequest(uint256 requestId, address controller_) public view returns (uint256 assets) {
+        Request storage r = depositRequests[controller_];
         if (r.epoch == requestId && epochNavPerShare[r.epoch] != 0) return uint256(r.amountWad) / assetScale;
     }
 
     /// @notice ERC-7540 pending (not-yet-settled) redeem shares for a request.
     /// @param requestId The epoch the request was made in.
-    /// @param controller The controller whose request is queried.
+    /// @param controller_ The controller whose request is queried.
     /// @return shares The pending redeem shares in WAD, or 0 if the request is
     ///         absent, from another epoch, or already settled.
-    function pendingRedeemRequest(uint256 requestId, address controller) public view returns (uint256 shares) {
-        Request storage r = redeemRequests[controller];
+    function pendingRedeemRequest(uint256 requestId, address controller_) public view returns (uint256 shares) {
+        Request storage r = redeemRequests[controller_];
         if (r.epoch == requestId && epochNavPerShare[r.epoch] == 0) return uint256(r.amountWad);
     }
 
     /// @notice ERC-7540 claimable (settled) redeem shares for a request.
     /// @param requestId The epoch the request was made in.
-    /// @param controller The controller whose request is queried.
+    /// @param controller_ The controller whose request is queried.
     /// @return shares The claimable redeem shares in WAD, or 0 if the request is
     ///         absent, from another epoch, or not yet settled.
-    function claimableRedeemRequest(uint256 requestId, address controller) public view returns (uint256 shares) {
-        Request storage r = redeemRequests[controller];
+    function claimableRedeemRequest(uint256 requestId, address controller_) public view returns (uint256 shares) {
+        Request storage r = redeemRequests[controller_];
         if (r.epoch == requestId && epochNavPerShare[r.epoch] != 0) return uint256(r.amountWad);
     }
 
@@ -900,9 +900,9 @@ contract CPPIVault is ERC20, Ownable {
 
     /// @notice Require that the caller is the controller itself or its operator.
     /// @dev Reverts NotOperator otherwise.
-    /// @param controller The controller whose authority is being checked.
-    function _authControllerOrOperator(address controller) internal view {
-        if (msg.sender != controller && !isOperator[controller][msg.sender]) revert NotOperator();
+    /// @param controller_ The controller whose authority is being checked.
+    function _authControllerOrOperator(address controller_) internal view {
+        if (msg.sender != controller_ && !isOperator[controller_][msg.sender]) revert NotOperator();
     }
 
     /// @notice Require the oracle be healthy (or unconfigured) to proceed.
